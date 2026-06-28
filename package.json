@@ -1,0 +1,34 @@
+{
+  "name": "personal-claw",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=24.0.0",
+    "pnpm": ">=11.0.0"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @personal-claw/desktop dev",
+    "build": "pnpm --filter @personal-claw/desktop build",
+    "typecheck": "vue-tsc --noEmit -p apps/desktop/tsconfig.web.json && tsc --noEmit -p apps/desktop/tsconfig.node.json && tsc --noEmit -p packages/contracts/tsconfig.json && tsc --noEmit -p packages/shared/tsconfig.json && tsc --noEmit -p packages/domain/tsconfig.json && tsc --noEmit -p packages/application/tsconfig.json && tsc --noEmit -p packages/infrastructure-sqlite/tsconfig.json && tsc --noEmit -p packages/pi-runtime-adapter/tsconfig.json && tsc --noEmit -p packages/chat-ui-adapter/tsconfig.json && tsc --noEmit -p packages/tool-sdk/tsconfig.json && tsc --noEmit -p packages/policy-engine/tsconfig.json && tsc --noEmit -p packages/scheduler/tsconfig.json",
+    "test": "vitest run",
+    "lint": "pnpm lint:boundaries",
+    "lint:boundaries": "node tools/check-renderer-boundary.mjs && node tools/check-package-boundaries.mjs",
+    "smoke": "pnpm --filter @personal-claw/desktop smoke",
+    "smoke:renderer": "pnpm --filter @personal-claw/desktop smoke:renderer",
+    "verify": "pnpm typecheck && pnpm lint && pnpm test"
+  },
+  "devDependencies": {
+    "@types/node": "26.0.1",
+    "@vitejs/plugin-vue": "6.0.7",
+    "@vue/tsconfig": "0.9.1",
+    "electron": "42.5.0",
+    "electron-builder": "26.15.3",
+    "electron-vite": "5.0.0",
+    "typescript": "6.0.3",
+    "vite": "8.1.0",
+    "vitest": "4.1.9",
+    "vue-tsc": "3.3.5"
+  }
+}

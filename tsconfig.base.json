@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "useDefineForClassFields": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "ignoreDeprecations": "6.0",
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    "paths": {
+      "@personal-claw/contracts": ["packages/contracts/src/index.ts"],
+      "@personal-claw/shared": ["packages/shared/src/index.ts"],
+      "@personal-claw/domain": ["packages/domain/src/index.ts"],
+      "@personal-claw/application": ["packages/application/src/index.ts"],
+      "@personal-claw/infrastructure-sqlite": ["packages/infrastructure-sqlite/src/index.ts"],
+      "@personal-claw/pi-runtime-adapter": ["packages/pi-runtime-adapter/src/index.ts"],
+      "@personal-claw/chat-ui-adapter": ["packages/chat-ui-adapter/src/index.ts"],
+      "@personal-claw/tool-sdk": ["packages/tool-sdk/src/index.ts"],
+      "@personal-claw/policy-engine": ["packages/policy-engine/src/index.ts"],
+      "@personal-claw/scheduler": ["packages/scheduler/src/index.ts"]
+    }
+  }
+}
