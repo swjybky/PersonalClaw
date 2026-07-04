@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  AgentMessageCompletedEventEnvelopeSchema,
   CommandEnvelopeSchema,
+  SessionPromptAcceptedPayloadSchema,
   SystemHealthPayloadSchema,
   createEnvelope
 } from "@personal-claw/contracts";
@@ -40,5 +42,66 @@ describe("IPC envelope contracts", () => {
     };
 
     expect(SystemHealthPayloadSchema.parse(payload).workers[0]?.name).toBe("core");
+  });
+
+  it("accepts a versioned session.prompt command", () => {
+    const envelope = createEnvelope(
+      "session.prompt",
+      {
+        sessionId: "session_1",
+        message: "整理今天的个人任务"
+      },
+      {
+        id: "cmd_session_1",
+        context: {
+          correlationId: "cmd_session_1"
+        }
+      }
+    );
+
+    expect(CommandEnvelopeSchema.parse(envelope).type).toBe("session.prompt");
+  });
+
+  it("validates pi runtime prompt acceptance payloads", () => {
+    const payload = {
+      sessionId: "session_1",
+      runId: "run_1",
+      acceptedAt: new Date().toISOString(),
+      runtime: {
+        provider: "personal-claw",
+        model: "personal-task-manager",
+        mode: "local-faux"
+      }
+    };
+
+    expect(SessionPromptAcceptedPayloadSchema.parse(payload).runtime.mode).toBe("local-faux");
+  });
+
+  it("accepts agent message completed events", () => {
+    const envelope = createEnvelope(
+      "agent.message_completed",
+      {
+        sessionId: "session_1",
+        runId: "run_1",
+        messageId: "message_1",
+        role: "assistant",
+        content: "任务草稿已生成。",
+        runtime: {
+          provider: "personal-claw",
+          model: "personal-task-manager",
+          mode: "local-faux"
+        }
+      },
+      {
+        id: "evt_1",
+        context: {
+          correlationId: "cmd_session_1",
+          sessionId: "session_1",
+          runId: "run_1"
+        }
+      }
+    );
+
+    expect(AgentMessageCompletedEventEnvelopeSchema.parse(envelope).payload.role).toBe("assistant");
   });
 });

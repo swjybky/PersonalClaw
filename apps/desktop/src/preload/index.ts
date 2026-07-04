@@ -5,9 +5,21 @@ import {
   IPC_EVENT_CHANNEL,
   SystemEventEnvelopeSchema,
   SystemHealthPayloadSchema,
+  SessionPromptAcceptedPayloadSchema,
+  SessionPromptCommandPayloadSchema,
+  ModelConfigSummaryListPayloadSchema,
+  ModelConfigDeleteCommandPayloadSchema,
+  ModelConfigEntryInputSchema,
+  ModelConfigSetDefaultCommandPayloadSchema,
   createEnvelope,
   type CommandType,
+  type ModelConfigDeleteCommandPayload,
+  type ModelConfigEntryInput,
+  type ModelConfigSetDefaultCommandPayload,
+  type ModelConfigSummaryListPayload,
   type PersonalClawApi,
+  type SessionPromptAcceptedPayload,
+  type SessionPromptCommandPayload,
   type SystemEventEnvelope,
   type SystemHealthPayload
 } from "@personal-claw/contracts";
@@ -42,6 +54,44 @@ const api: PersonalClawApi = {
   system: {
     async health(): Promise<SystemHealthPayload> {
       return SystemHealthPayloadSchema.parse(await invokeCommand<SystemHealthPayload>("system.health", {}));
+    }
+  },
+  session: {
+    async prompt(payload: SessionPromptCommandPayload): Promise<SessionPromptAcceptedPayload> {
+      return SessionPromptAcceptedPayloadSchema.parse(
+        await invokeCommand<SessionPromptAcceptedPayload>("session.prompt", SessionPromptCommandPayloadSchema.parse(payload))
+      );
+    }
+  },
+  modelConfig: {
+    async list(): Promise<ModelConfigSummaryListPayload> {
+      return ModelConfigSummaryListPayloadSchema.parse(
+        await invokeCommand<ModelConfigSummaryListPayload>("modelConfig.list", {})
+      );
+    },
+    async upsert(entry: ModelConfigEntryInput): Promise<ModelConfigSummaryListPayload> {
+      return ModelConfigSummaryListPayloadSchema.parse(
+        await invokeCommand<ModelConfigSummaryListPayload>(
+          "modelConfig.upsert",
+          { entry: ModelConfigEntryInputSchema.parse(entry) }
+        )
+      );
+    },
+    async delete(payload: ModelConfigDeleteCommandPayload): Promise<ModelConfigSummaryListPayload> {
+      return ModelConfigSummaryListPayloadSchema.parse(
+        await invokeCommand<ModelConfigSummaryListPayload>(
+          "modelConfig.delete",
+          ModelConfigDeleteCommandPayloadSchema.parse(payload)
+        )
+      );
+    },
+    async setDefault(payload: ModelConfigSetDefaultCommandPayload): Promise<ModelConfigSummaryListPayload> {
+      return ModelConfigSummaryListPayloadSchema.parse(
+        await invokeCommand<ModelConfigSummaryListPayload>(
+          "modelConfig.setDefault",
+          ModelConfigSetDefaultCommandPayloadSchema.parse(payload)
+        )
+      );
     }
   },
   events: {

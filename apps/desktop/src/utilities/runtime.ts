@@ -1,4 +1,12 @@
-import type { UtilityHealthPayload, UtilityWorkerName } from "@personal-claw/contracts";
+import {
+  CommandEnvelopeSchema,
+  CommandResultSchema,
+  type CommandEnvelope,
+  type CommandResult,
+  type SystemEventEnvelope,
+  type UtilityHealthPayload,
+  type UtilityWorkerName
+} from "@personal-claw/contracts";
 import { createLogger, nowIso } from "@personal-claw/shared";
 
 type UtilityInboundMessage =
@@ -9,7 +17,19 @@ type UtilityInboundMessage =
   | {
       kind: "utility.shutdown";
       requestId: string;
+    }
+  | {
+      kind: "utility.command.request";
+      requestId: string;
+      command: CommandEnvelope;
     };
+
+interface UtilityRuntimeOptions {
+  commandHandler?: (
+    command: CommandEnvelope,
+    emitEvent: (event: SystemEventEnvelope) => void
+  ) => Promise<CommandResult> | CommandResult;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -37,10 +57,38 @@ function parseInboundMessage(message: unknown): UtilityInboundMessage | undefine
     };
   }
 
+  if (raw.kind === "utility.command.request") {
+    const parsedCommand = CommandEnvelopeSchema.safeParse(raw.command);
+
+    if (!parsedCommand.success) {
+      return undefined;
+    }
+
+    return {
+      kind: raw.kind,
+      requestId: raw.requestId,
+      command: parsedCommand.data
+    };
+  }
+
   return undefined;
 }
 
-export function bootUtility(worker: UtilityWorkerName): void {
+function serializeError(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack
+    };
+  }
+
+  return {
+    value: error
+  };
+}
+
+export function bootUtility(worker: UtilityWorkerName, options: UtilityRuntimeOptions = {}): void {
   const logger = createLogger({ process: worker, workerId: `${worker}-${process.pid}` });
   const port = process.parentPort;
 
@@ -95,6 +143,54 @@ export function bootUtility(worker: UtilityWorkerName): void {
     }, 25).unref();
   };
 
+  const handleCommand = async (requestId: string, command: CommandEnvelope): Promise<void> => {
+    const emitEvent = (event: SystemEventEnvelope): void => {
+      port.postMessage({
+        kind: "utility.command.event",
+        worker,
+        requestId,
+        event
+      });
+    };
+
+    try {
+      const rawResult = options.commandHandler
+        ? await options.commandHandler(command, emitEvent)
+        : {
+            status: "rejected" as const,
+            requestId: command.id,
+            error: {
+              code: "utility.unsupported_command",
+              message: `${worker} utility does not handle ${command.type}.`
+            }
+          };
+      const result = CommandResultSchema.parse(rawResult);
+
+      port.postMessage({
+        kind: "utility.command.result",
+        worker,
+        requestId,
+        result
+      });
+    } catch (error: unknown) {
+      logger.error({ requestId, error: serializeError(error) }, "utility command failed");
+      port.postMessage({
+        kind: "utility.command.result",
+        worker,
+        requestId,
+        result: {
+          status: "rejected",
+          requestId: command.id,
+          error: {
+            code: "utility.command_failed",
+            message: error instanceof Error ? error.message : "Utility command failed.",
+            details: serializeError(error)
+          }
+        }
+      });
+    }
+  };
+
   port.on("message", (message: unknown) => {
     const command = parseInboundMessage(message);
 
@@ -110,6 +206,11 @@ export function bootUtility(worker: UtilityWorkerName): void {
         requestId: command.requestId,
         payload: buildHealth()
       });
+      return;
+    }
+
+    if (command.kind === "utility.command.request") {
+      void handleCommand(command.requestId, command.command);
       return;
     }
 

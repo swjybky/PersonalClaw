@@ -4,9 +4,18 @@ export const navigationItems = [
     label: "新建对话",
     eyebrow: "个人任务管理智能体",
     title: "新建对话",
-    phase: "Phase 0",
-    summary: "当前阶段提供对话工作台壳，后续由 pi-ai-web adapter 与 pi-agent 接管消息流。",
-    modules: ["对话入口", "任务草稿", "会话上下文", "pi-ai-web Adapter"]
+    phase: "Phase 1",
+    summary: "对话工作台通过 Agent Utility 接入 pi-ai 与 pi-agent-core，消息流经协议事件回传。",
+    modules: ["对话入口", "任务草稿", "会话上下文", "pi runtime Adapter"]
+  },
+  {
+    key: "model-config",
+    label: "模型配置",
+    eyebrow: "pi-ai 模型与密钥",
+    title: "模型配置",
+    phase: "Phase 1+",
+    summary: "为 pi-ai 配置默认模型、provider 与 API key。密钥仅写入主进程，Renderer 只持有 secretRef。",
+    modules: ["模型列表", "默认模型", "Provider", "API Key"]
   },
   {
     key: "project-config",

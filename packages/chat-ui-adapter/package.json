@@ -8,5 +8,10 @@
       "types": "./src/index.ts",
       "import": "./src/index.ts"
     }
+  },
+  "dependencies": {
+    "@earendil-works/pi-web-ui": "0.75.3",
+    "@mariozechner/mini-lit": "0.2.0",
+    "lit": "3.3.1"
   }
 }

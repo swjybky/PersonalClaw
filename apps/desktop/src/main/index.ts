@@ -8,16 +8,30 @@ import {
   SystemHealthPayloadSchema,
   createEnvelope,
   type CommandResult,
+  type ModelConfigDeleteCommandPayload,
+  type ModelConfigEntryInput,
+  type ModelConfigSetDefaultCommandPayload,
+  type ModelConfigSummaryListPayload,
   type SystemEventEnvelope,
   type UtilityWorkerName
 } from "@personal-claw/contracts";
 import { createId, createLogger, nowIso } from "@personal-claw/shared";
+import { ModelConfigStore, resolveModelConfigPath } from "./model-config-store";
 import { UtilitySupervisor } from "./supervisor";
 
 const logger = createLogger({ process: "main" });
 const startedAt = nowIso();
 let mainWindow: BrowserWindow | undefined;
 let isQuitting = false;
+let modelConfigStore: ModelConfigStore | undefined;
+
+function getModelConfigStore(): ModelConfigStore {
+  if (!modelConfigStore) {
+    modelConfigStore = new ModelConfigStore(resolveModelConfigPath(app.getPath("userData")));
+  }
+
+  return modelConfigStore;
+}
 
 interface RendererSmokeSummary {
   status: string;
@@ -29,6 +43,15 @@ interface RendererSmokeSummary {
     beforeTitle: string | null;
     afterTitle: string | null;
     activeKey: string | null;
+  };
+  agent: {
+    status: string;
+    runtimeMode: string | null;
+  };
+  piWebComponents: {
+    status: string;
+    hasMessageList: boolean;
+    hasMessageEditor: boolean;
   };
 }
 
@@ -57,6 +80,9 @@ function serializeError(error: unknown): Record<string, unknown> {
 }
 
 const supervisor = new UtilitySupervisor({
+  onUtilityEvent(event: SystemEventEnvelope) {
+    broadcastEvent(event);
+  },
   onUnexpectedExit(worker: UtilityWorkerName, reason: string) {
     const event = createEnvelope(
       "system.worker_restarted",
@@ -112,12 +138,84 @@ function registerIpcHandlers(): void {
       };
     }
 
+    if (command.type === "session.prompt") {
+      try {
+        return await supervisor.requestCommand("agent", command);
+      } catch (error: unknown) {
+        return {
+          status: "rejected",
+          requestId: command.id,
+          error: {
+            code: "ipc.utility_command_failed",
+            message: error instanceof Error ? error.message : "Utility command failed.",
+            details: serializeError(error)
+          }
+        };
+      }
+    }
+
+    if (command.type === "modelConfig.list") {
+      return {
+        status: "accepted",
+        requestId: command.id,
+        payload: getModelConfigStore().list()
+      };
+    }
+
+    if (command.type === "modelConfig.upsert") {
+      try {
+        const payload: ModelConfigSummaryListPayload = getModelConfigStore().upsert(
+          command.payload.entry as ModelConfigEntryInput
+        );
+
+        return {
+          status: "accepted",
+          requestId: command.id,
+          payload
+        };
+      } catch (error: unknown) {
+        return {
+          status: "rejected",
+          requestId: command.id,
+          error: {
+            code: "modelConfig.upsert_failed",
+            message: error instanceof Error ? error.message : "Model config upsert failed.",
+            details: serializeError(error)
+          }
+        };
+      }
+    }
+
+    if (command.type === "modelConfig.delete") {
+      const payload = getModelConfigStore().delete(
+        (command.payload as ModelConfigDeleteCommandPayload).id
+      );
+
+      return {
+        status: "accepted",
+        requestId: command.id,
+        payload
+      };
+    }
+
+    if (command.type === "modelConfig.setDefault") {
+      const payload = getModelConfigStore().setDefault(
+        (command.payload as ModelConfigSetDefaultCommandPayload).id
+      );
+
+      return {
+        status: "accepted",
+        requestId: command.id,
+        payload
+      };
+    }
+
     return {
       status: "rejected",
-      requestId: command.id,
+      requestId: "unsupported",
       error: {
         code: "ipc.unsupported_command",
-        message: `Unsupported command: ${command.type}`
+        message: "Unsupported command."
       }
     };
   });
@@ -128,13 +226,27 @@ function isRendererSmokeSummary(value: unknown): value is RendererSmokeSummary {
     return false;
   }
 
-  const candidate = value as { status: unknown; workers: unknown; navigation?: unknown };
+  const candidate = value as {
+    status: unknown;
+    workers: unknown;
+    navigation?: unknown;
+    agent?: unknown;
+    piWebComponents?: unknown;
+  };
 
   if (typeof candidate.status !== "string" || !Array.isArray(candidate.workers)) {
     return false;
   }
 
   if (typeof candidate.navigation !== "object" || candidate.navigation === null) {
+    return false;
+  }
+
+  if (typeof candidate.agent !== "object" || candidate.agent === null) {
+    return false;
+  }
+
+  if (typeof candidate.piWebComponents !== "object" || candidate.piWebComponents === null) {
     return false;
   }
 
@@ -145,11 +257,25 @@ function isRendererSmokeSummary(value: unknown): value is RendererSmokeSummary {
   };
 
   const hasNullableString = (item: unknown): item is string | null => typeof item === "string" || item === null;
+  const agent = candidate.agent as {
+    status?: unknown;
+    runtimeMode?: unknown;
+  };
+  const piWebComponents = candidate.piWebComponents as {
+    status?: unknown;
+    hasMessageList?: unknown;
+    hasMessageEditor?: unknown;
+  };
 
   return (
     hasNullableString(navigation.beforeTitle) &&
     hasNullableString(navigation.afterTitle) &&
-    hasNullableString(navigation.activeKey)
+    hasNullableString(navigation.activeKey) &&
+    typeof agent.status === "string" &&
+    hasNullableString(agent.runtimeMode) &&
+    typeof piWebComponents.status === "string" &&
+    typeof piWebComponents.hasMessageList === "boolean" &&
+    typeof piWebComponents.hasMessageEditor === "boolean"
   );
 }
 
@@ -200,7 +326,7 @@ async function createMainWindow(options: { showWhenReady?: boolean } = {}): Prom
       createEnvelope(
         "system.ready",
         {
-          status: "ready",
+          status: "ready" as const,
           startedAt,
           workers: health.workers
         },
@@ -249,8 +375,75 @@ async function runRendererSmoke(): Promise<void> {
         }
 
         const health = await window.personalClaw.system.health();
+        const smokeSessionId = "renderer-smoke-session";
+        const agent = await new Promise((resolve) => {
+          let settled = false;
+          const unsubscribe = window.personalClaw.events.subscribe((event) => {
+            if (event.type === "agent.message_completed" && event.payload.sessionId === smokeSessionId) {
+              settled = true;
+              unsubscribe();
+              resolve({
+                status: "ok",
+                runtimeMode: event.payload.runtime.mode
+              });
+            }
+
+            if (event.type === "agent.error" && event.payload.sessionId === smokeSessionId) {
+              settled = true;
+              unsubscribe();
+              resolve({
+                status: event.payload.code,
+                runtimeMode: event.payload.runtime?.mode ?? null
+              });
+            }
+          });
+
+          window.personalClaw.session.prompt({
+            sessionId: smokeSessionId,
+            message: "renderer smoke task"
+          }).catch((error) => {
+            if (!settled) {
+              settled = true;
+              unsubscribe();
+              resolve({
+                status: error instanceof Error ? error.message : "prompt_failed",
+                runtimeMode: null
+              });
+            }
+          });
+
+          setTimeout(() => {
+            if (!settled) {
+              settled = true;
+              unsubscribe();
+              resolve({
+                status: "agent_timeout",
+                runtimeMode: null
+              });
+            }
+          }, 3000);
+        });
+        const piWebComponents = await Promise.race([
+          Promise.all([
+            customElements.whenDefined("message-list"),
+            customElements.whenDefined("message-editor")
+          ]).then(() => ({
+            status: "ok",
+            hasMessageList: document.querySelector("message-list") instanceof HTMLElement,
+            hasMessageEditor: document.querySelector("message-editor") instanceof HTMLElement
+          })),
+          new Promise((resolve) => {
+            setTimeout(() => {
+              resolve({
+                status: "pi_web_timeout",
+                hasMessageList: document.querySelector("message-list") instanceof HTMLElement,
+                hasMessageEditor: document.querySelector("message-editor") instanceof HTMLElement
+              });
+            }, 3000);
+          })
+        ]);
         const beforeTitle = document.querySelector("h1")?.textContent?.trim() ?? null;
-        const projectButton = document.querySelector('[data-nav-key="projects"]');
+        const projectButton = document.querySelector('[data-nav-key="project-config"]');
 
         if (projectButton instanceof HTMLButtonElement) {
           projectButton.click();
@@ -263,11 +456,18 @@ async function runRendererSmoke(): Promise<void> {
         const navigationUpdated =
           projectButton instanceof HTMLButtonElement &&
           beforeTitle !== afterTitle &&
-          afterTitle === "项目" &&
-          activeKey === "projects";
+          afterTitle === "项目配置" &&
+          activeKey === "project-config";
 
         return {
-          status: navigationUpdated ? health.status : "navigation_click_failed",
+          status:
+            navigationUpdated &&
+            agent.status === "ok" &&
+            piWebComponents.status === "ok" &&
+            piWebComponents.hasMessageList &&
+            piWebComponents.hasMessageEditor
+              ? health.status
+              : "navigation_agent_or_pi_web_failed",
           workers: health.workers.map((worker) => ({
             name: worker.name,
             status: worker.status
@@ -276,12 +476,14 @@ async function runRendererSmoke(): Promise<void> {
             beforeTitle,
             afterTitle,
             activeKey
-          }
+          },
+          agent,
+          piWebComponents
         };
       })()
     `),
     new Promise<never>((_resolve, reject) => {
-      setTimeout(() => reject(new Error("Renderer smoke timed out.")), 4000);
+      setTimeout(() => reject(new Error("Renderer smoke timed out.")), 8000);
     })
   ]);
 
@@ -310,6 +512,7 @@ registerIpcHandlers();
 
 app.whenReady().then(async () => {
   validateAppIcon();
+  supervisor.setEnvironment({ PERSONAL_CLAW_USER_DATA_DIR: app.getPath("userData") });
   supervisor.startAll();
 
   if (process.env.PERSONAL_CLAW_SMOKE === "1") {

@@ -15,6 +15,7 @@
     "@personal-claw/application": "workspace:*",
     "@personal-claw/chat-ui-adapter": "workspace:*",
     "@personal-claw/contracts": "workspace:*",
+    "@personal-claw/pi-runtime-adapter": "workspace:*",
     "@personal-claw/shared": "workspace:*",
     "naive-ui": "2.44.1",
     "pinia": "3.0.4",

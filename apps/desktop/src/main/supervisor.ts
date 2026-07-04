@@ -1,6 +1,14 @@
 import { utilityProcess, type UtilityProcess } from "electron";
 import { join } from "node:path";
-import type { UtilityHealthPayload, UtilityWorkerName } from "@personal-claw/contracts";
+import {
+  CommandResultSchema,
+  SystemEventEnvelopeSchema,
+  type CommandEnvelope,
+  type CommandResult,
+  type SystemEventEnvelope,
+  type UtilityHealthPayload,
+  type UtilityWorkerName
+} from "@personal-claw/contracts";
 import { createId, createLogger, nowIso } from "@personal-claw/shared";
 
 type WorkerStatus = UtilityHealthPayload["status"];
@@ -16,8 +24,15 @@ interface PendingShutdown {
   timer: NodeJS.Timeout;
 }
 
+interface PendingCommand {
+  resolve(value: CommandResult): void;
+  reject(error: Error): void;
+  timer: NodeJS.Timeout;
+}
+
 interface UtilitySupervisorOptions {
   onUnexpectedExit(worker: UtilityWorkerName, reason: string): void;
+  onUtilityEvent(event: SystemEventEnvelope): void;
 }
 
 const logger = createLogger({ process: "main", workerId: "utility-supervisor" });
@@ -43,11 +58,14 @@ class UtilityWorkerProcess {
   private isStopping = false;
   private readonly pendingHealth = new Map<string, PendingHealth>();
   private readonly pendingShutdown = new Map<string, PendingShutdown>();
+  private readonly pendingCommands = new Map<string, PendingCommand>();
 
   constructor(
     private readonly worker: UtilityWorkerName,
     private readonly entryPath: string,
-    private readonly onUnexpectedExit: (worker: UtilityWorkerName, reason: string) => void
+    private readonly onUnexpectedExit: (worker: UtilityWorkerName, reason: string) => void,
+    private readonly onUtilityEvent: (event: SystemEventEnvelope) => void,
+    private readonly env: NodeJS.ProcessEnv = {}
   ) {}
 
   start(): void {
@@ -57,7 +75,9 @@ class UtilityWorkerProcess {
 
     this.isStopping = false;
     this.status = "starting";
-    this.child = utilityProcess.fork(this.entryPath);
+    this.child = utilityProcess.fork(this.entryPath, [], {
+      env: { ...process.env, ...this.env }
+    });
     this.pid = this.child.pid;
 
     this.child.on("message", (message: unknown) => {
@@ -69,6 +89,7 @@ class UtilityWorkerProcess {
       this.child = undefined;
       this.status = "stopped";
       this.rejectPendingHealth(new Error(`${this.worker} utility exited: ${reason}`));
+      this.rejectPendingCommands(new Error(`${this.worker} utility exited: ${reason}`));
       this.resolvePendingShutdown();
 
       if (!this.isStopping) {
@@ -159,6 +180,42 @@ class UtilityWorkerProcess {
     return shutdown;
   }
 
+  requestCommand(command: CommandEnvelope, timeoutMs = 60_000): Promise<CommandResult> {
+    if (!this.child) {
+      return Promise.resolve({
+        status: "rejected",
+        requestId: command.id,
+        error: {
+          code: "utility.not_running",
+          message: `${this.worker} utility is not running.`
+        }
+      });
+    }
+
+    const requestId = command.id;
+    const child = this.child;
+    const result = new Promise<CommandResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingCommands.delete(requestId);
+        reject(new Error(`${this.worker} utility command timed out: ${command.type}`));
+      }, timeoutMs);
+
+      this.pendingCommands.set(requestId, {
+        resolve,
+        reject,
+        timer
+      });
+    });
+
+    child.postMessage({
+      kind: "utility.command.request",
+      requestId,
+      command
+    });
+
+    return result;
+  }
+
   private handleMessage(message: unknown): void {
     if (!isRecord(message)) {
       return;
@@ -212,6 +269,30 @@ class UtilityWorkerProcess {
       return;
     }
 
+    if (kind === "utility.command.result") {
+      const requestId = readString(message, "requestId");
+      const pending = requestId ? this.pendingCommands.get(requestId) : undefined;
+      const parsed = CommandResultSchema.safeParse(message.result);
+
+      if (requestId && pending && parsed.success) {
+        clearTimeout(pending.timer);
+        this.pendingCommands.delete(requestId);
+        pending.resolve(parsed.data);
+      }
+      return;
+    }
+
+    if (kind === "utility.command.event") {
+      const parsed = SystemEventEnvelopeSchema.safeParse(message.event);
+
+      if (parsed.success) {
+        this.onUtilityEvent(parsed.data as SystemEventEnvelope);
+      } else {
+        logger.warn({ worker: this.worker, message }, "utility emitted invalid event");
+      }
+      return;
+    }
+
     if (kind === "utility.error") {
       logger.error({ worker: this.worker, message }, "utility reported error");
     }
@@ -222,6 +303,14 @@ class UtilityWorkerProcess {
       clearTimeout(pending.timer);
       pending.reject(error);
       this.pendingHealth.delete(requestId);
+    }
+  }
+
+  private rejectPendingCommands(error: Error): void {
+    for (const [requestId, pending] of this.pendingCommands.entries()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+      this.pendingCommands.delete(requestId);
     }
   }
 
@@ -236,16 +325,28 @@ class UtilityWorkerProcess {
 
 export class UtilitySupervisor {
   private readonly workers: Map<UtilityWorkerName, UtilityWorkerProcess>;
+  private readonly env: NodeJS.ProcessEnv;
 
-  constructor(options: UtilitySupervisorOptions) {
+  constructor(options: UtilitySupervisorOptions, env: NodeJS.ProcessEnv = {}) {
+    this.env = env;
     const createWorker = (worker: UtilityWorkerName): UtilityWorkerProcess =>
-      new UtilityWorkerProcess(worker, join(__dirname, "utilities", `${worker}-entry.js`), options.onUnexpectedExit);
+      new UtilityWorkerProcess(
+        worker,
+        join(__dirname, "utilities", `${worker}-entry.js`),
+        options.onUnexpectedExit,
+        options.onUtilityEvent,
+        this.env
+      );
 
     this.workers = new Map([
       ["core", createWorker("core")],
       ["agent", createWorker("agent")],
       ["tool", createWorker("tool")]
     ]);
+  }
+
+  setEnvironment(env: NodeJS.ProcessEnv): void {
+    Object.assign(this.env, env);
   }
 
   startAll(): void {
@@ -275,5 +376,22 @@ export class UtilitySupervisor {
 
   async shutdownAll(): Promise<void> {
     await Promise.all([...this.workers.values()].map((worker) => worker.shutdown()));
+  }
+
+  requestCommand(worker: UtilityWorkerName, command: CommandEnvelope, timeoutMs?: number): Promise<CommandResult> {
+    const target = this.workers.get(worker);
+
+    if (!target) {
+      return Promise.resolve({
+        status: "rejected",
+        requestId: command.id,
+        error: {
+          code: "utility.unknown_worker",
+          message: `Unknown utility worker: ${worker}`
+        }
+      });
+    }
+
+    return target.requestCommand(command, timeoutMs);
   }
 }

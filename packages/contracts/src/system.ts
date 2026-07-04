@@ -1,5 +1,22 @@
 import { z } from "zod";
 import { EnvelopeBaseSchema, type Envelope } from "./envelope";
+import {
+  AgentErrorEventEnvelopeSchema,
+  AgentMessageCompletedEventEnvelopeSchema,
+  AgentMessageDeltaEventEnvelopeSchema,
+  AgentToolRequestedEventEnvelopeSchema,
+  SessionPromptCommandEnvelopeSchema,
+  type AgentErrorEventEnvelope,
+  type AgentMessageCompletedEventEnvelope,
+  type AgentMessageDeltaEventEnvelope,
+  type AgentToolRequestedEventEnvelope
+} from "./session";
+import {
+  ModelConfigDeleteCommandEnvelopeSchema,
+  ModelConfigListCommandEnvelopeSchema,
+  ModelConfigSetDefaultCommandEnvelopeSchema,
+  ModelConfigUpsertCommandEnvelopeSchema
+} from "./model-config";
 
 export const UtilityWorkerNameSchema = z.enum(["core", "agent", "tool"]);
 export type UtilityWorkerName = z.infer<typeof UtilityWorkerNameSchema>;
@@ -42,10 +59,19 @@ export const ErrorPayloadSchema = z.object({
 
 export type ErrorPayload = z.infer<typeof ErrorPayloadSchema>;
 
-export const CommandEnvelopeSchema = EnvelopeBaseSchema.extend({
+export const SystemHealthCommandEnvelopeSchema = EnvelopeBaseSchema.extend({
   type: z.literal("system.health"),
   payload: SystemHealthCommandPayloadSchema
 });
+
+export const CommandEnvelopeSchema = z.discriminatedUnion("type", [
+  SystemHealthCommandEnvelopeSchema,
+  SessionPromptCommandEnvelopeSchema,
+  ModelConfigListCommandEnvelopeSchema,
+  ModelConfigUpsertCommandEnvelopeSchema,
+  ModelConfigDeleteCommandEnvelopeSchema,
+  ModelConfigSetDefaultCommandEnvelopeSchema
+]);
 
 export type CommandEnvelope = z.infer<typeof CommandEnvelopeSchema>;
 export type CommandType = CommandEnvelope["type"];
@@ -95,7 +121,11 @@ export const SystemEventEnvelopeSchema = z.discriminatedUnion("type", [
   SystemReadyEventEnvelopeSchema,
   SystemHealthEventEnvelopeSchema,
   SystemErrorEventEnvelopeSchema,
-  SystemWorkerRestartedEventEnvelopeSchema
+  SystemWorkerRestartedEventEnvelopeSchema,
+  AgentMessageDeltaEventEnvelopeSchema,
+  AgentMessageCompletedEventEnvelopeSchema,
+  AgentToolRequestedEventEnvelopeSchema,
+  AgentErrorEventEnvelopeSchema
 ]);
 
 export type SystemEventEnvelope =
@@ -109,4 +139,8 @@ export type SystemEventEnvelope =
         restartedAt: string;
       },
       "system.worker_restarted"
-    >;
+    >
+  | AgentMessageDeltaEventEnvelope
+  | AgentMessageCompletedEventEnvelope
+  | AgentToolRequestedEventEnvelope
+  | AgentErrorEventEnvelope;
