@@ -2717,6 +2717,7 @@ h2 {
   display: flex;
   gap: 10px;
   flex-shrink: 0;
+  align-self: flex-end;
 }
 
 .project-config-primary {
