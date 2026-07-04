@@ -177,20 +177,8 @@ function hasThinking(message: UiMessage): boolean {
   return message.role === "assistant" && Boolean(message.thinking?.trim());
 }
 
-function isWaitingForThinking(message: UiMessage): boolean {
-  return (
-    props.canUseThinking &&
-    props.thinkingLevel !== "off" &&
-    isStreaming.value &&
-    message.role === "assistant" &&
-    isLatestAssistantMessage(message) &&
-    !message.content.trim() &&
-    !message.thinking?.trim()
-  );
-}
-
 function shouldShowThinkingBlock(message: UiMessage): boolean {
-  return hasThinking(message) || isWaitingForThinking(message);
+  return hasThinking(message);
 }
 
 function isThinkingActive(message: UiMessage): boolean {
@@ -202,14 +190,10 @@ function isThinkingActive(message: UiMessage): boolean {
     return false;
   }
 
-  return hasThinking(message) || isWaitingForThinking(message);
+  return hasThinking(message);
 }
 
 function isThinkingExpanded(message: UiMessage): boolean {
-  if (isWaitingForThinking(message)) {
-    return true;
-  }
-
   if (!hasThinking(message)) {
     return false;
   }
@@ -370,7 +354,6 @@ watch(
                     :content.prop="prepareMarkdownContent(message.thinking ?? '')"
                   ></markdown-block>
                   <span v-else-if="message.thinking?.trim()" class="thinking-block-plain">{{ message.thinking }}</span>
-                  <p v-else class="thinking-block-waiting">正在等待模型返回思考流...</p>
                 </div>
               </div>
 

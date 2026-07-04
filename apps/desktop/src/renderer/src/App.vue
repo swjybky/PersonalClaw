@@ -1298,7 +1298,6 @@ onBeforeUnmount(() => {
             <div class="settings-editor-heading">
               <div>
                 <p class="eyebrow">系统提示词</p>
-                <h2>任务提示词</h2>
               </div>
             </div>
             <textarea

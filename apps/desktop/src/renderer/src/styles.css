@@ -843,8 +843,7 @@ h2 {
 .thinking-block-markdown h1,
 .thinking-block-markdown h2,
 .thinking-block-markdown h3,
-.thinking-block-markdown span,
-.thinking-block-waiting {
+.thinking-block-markdown span {
   margin: 0;
   color: rgba(95, 99, 104, 0.38);
   font-style: italic;
@@ -894,11 +893,6 @@ h2 {
   word-break: break-word;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-style: normal;
-}
-
-.thinking-block-waiting {
-  color: rgba(92, 105, 128, 0.36);
-  font-style: italic;
 }
 
 .native-message-list {
@@ -1316,6 +1310,11 @@ h2 {
 
 .native-message.is-user + .native-message.is-assistant .thinking-block:first-child {
   margin-top: 16px;
+}
+
+.native-message.is-assistant + .native-message.is-user,
+.native-message.is-system + .native-message.is-user {
+  margin-top: 20px;
 }
 
 .composer-dock {
