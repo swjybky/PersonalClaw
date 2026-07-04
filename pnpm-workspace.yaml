@@ -6,12 +6,14 @@ overrides:
   xlsx: 0.18.5
 
 onlyBuiltDependencies:
+  - better-sqlite3
   - electron
   - electron-winstaller
   - esbuild
 
 allowBuilds:
   '@google/genai': true
+  better-sqlite3: true
   electron-winstaller: true
   esbuild: true
   protobufjs: true

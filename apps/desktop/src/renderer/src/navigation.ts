@@ -23,8 +23,8 @@ export const navigationItems = [
     eyebrow: "项目目录",
     title: "项目配置",
     phase: "Phase 1+",
-    summary: "用于配置个人项目目录、上下文边界、产物目录和默认权限范围。",
-    modules: ["项目目录", "上下文说明", "产物目录", "权限范围"]
+    summary: "管理项目名称、工作目录与背景介绍。",
+    modules: ["项目名称", "项目路径", "项目介绍"]
   },
   {
     key: "task-sources",
@@ -47,11 +47,26 @@ export const navigationItems = [
 ] as const;
 
 export type NavigationItem = (typeof navigationItems)[number];
-export type NavigationKey = NavigationItem["key"];
+export const settingsNavigationItem = {
+  key: "settings",
+  label: "设置",
+  eyebrow: "应用设置",
+  title: "设置",
+  phase: "Phase 1+",
+  summary: "用于配置个人智能体的系统提示词、运行偏好和应用级选项。当前页面仅提供 Renderer 侧编辑草稿。",
+  modules: ["系统提示词", "运行偏好", "隐私", "诊断"]
+} as const;
+
+export type AppNavigationItem = NavigationItem | typeof settingsNavigationItem;
+export type NavigationKey = NavigationItem["key"] | typeof settingsNavigationItem.key;
 
 export const defaultNavigationKey: NavigationKey = "conversation";
 
-export function getNavigationItem(key: NavigationKey): NavigationItem {
+export function getNavigationItem(key: NavigationKey): AppNavigationItem {
+  if (key === settingsNavigationItem.key) {
+    return settingsNavigationItem;
+  }
+
   const item = navigationItems.find((candidate) => candidate.key === key);
 
   if (!item) {

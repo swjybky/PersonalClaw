@@ -128,4 +128,67 @@ describe("conversation history storage", () => {
       ])
     ).toBe(true);
   });
+
+  it("preserves assistant thinking across save/load round-trips", () => {
+    const storage = new MemoryStorage();
+    const record = buildConversationHistoryRecord({
+      id: "conversation-thinking",
+      updatedAt: "2026-07-04T14:00:00.000Z",
+      messages: [
+        {
+          id: "message-user-1",
+          role: "user",
+          content: "把红框区域的 Worked for 5s 替换为对话标题",
+          createdAt: "2026-07-04T14:00:00.000Z"
+        },
+        {
+          id: "message-assistant-1",
+          role: "assistant",
+          content: "已替换红框区域为对话标题。",
+          createdAt: "2026-07-04T14:00:02.000Z",
+          thinking: "已理解需求：将红框区域的 Worked for 5s 替换为对话标题，并删除该区域的其他元素。"
+        }
+      ]
+    });
+
+    saveConversationHistory([record], storage);
+
+    const restored = loadConversationHistory(storage);
+    expect(restored).toHaveLength(1);
+    expect(restored[0]?.messages[1]?.thinking).toBe(
+      "已理解需求：将红框区域的 Worked for 5s 替换为对话标题，并删除该区域的其他元素。"
+    );
+  });
+
+  it("rejects records whose assistant thinking is not a string", () => {
+    const storage = new MemoryStorage();
+    storage.setItem(
+      conversationHistoryStorageKey,
+      JSON.stringify([
+        {
+          id: "conversation-bad-thinking",
+          title: "bad thinking",
+          detail: "bad thinking",
+          updatedAt: "2026-07-04T14:05:00.000Z",
+          messages: [
+            {
+              id: "message-user-1",
+              role: "user",
+              content: "整理任务",
+              createdAt: "2026-07-04T14:05:00.000Z"
+            },
+            {
+              id: "message-assistant-1",
+              role: "assistant",
+              content: "好的",
+              createdAt: "2026-07-04T14:05:01.000Z",
+              thinking: 42
+            }
+          ]
+        }
+      ])
+    );
+
+    expect(loadConversationHistory(storage)).toEqual([]);
+  });
 });

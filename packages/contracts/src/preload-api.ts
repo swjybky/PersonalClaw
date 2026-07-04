@@ -12,6 +12,28 @@ import type {
   TaskDraftAcceptedPayload,
   TaskDraftFromDescriptionCommandPayload
 } from "./task-draft";
+import type {
+  CodeAgentDeleteCommandPayload,
+  CodeAgentListCommandPayload,
+  CodeAgentListPayload,
+  CodeAgentProfileInput,
+  ProjectArchiveCommandPayload,
+  ProjectCreateCommandPayload,
+  ProjectListCommandPayload,
+  ProjectListPayload,
+  ProjectUpdateCommandPayload,
+  TaskAssignCodeAgentCommandPayload,
+  TaskCreateCommandPayload,
+  TaskDeleteCommandPayload,
+  TaskGetCommandPayload,
+  TaskListCommandPayload,
+  TaskListPayload,
+  TaskSetStatusCommandPayload,
+  TaskStatusView,
+  TaskSummary,
+  TaskUpdateCommandPayload,
+  TaskUpdateProgressCommandPayload
+} from "./task-core";
 
 export interface PersonalClawApi {
   system: {
@@ -24,6 +46,25 @@ export interface PersonalClawApi {
     draftFromDescription(
       payload: TaskDraftFromDescriptionCommandPayload
     ): Promise<TaskDraftAcceptedPayload>;
+    create(payload: TaskCreateCommandPayload): Promise<TaskSummary>;
+    list(payload: TaskListCommandPayload): Promise<TaskListPayload>;
+    get(payload: TaskGetCommandPayload): Promise<TaskStatusView>;
+    update(payload: TaskUpdateCommandPayload): Promise<TaskSummary>;
+    delete(payload: TaskDeleteCommandPayload): Promise<TaskSummary>;
+    setStatus(payload: TaskSetStatusCommandPayload): Promise<TaskSummary>;
+    updateProgress(payload: TaskUpdateProgressCommandPayload): Promise<TaskSummary>;
+    assignCodeAgent(payload: TaskAssignCodeAgentCommandPayload): Promise<TaskSummary>;
+  };
+  project: {
+    create(payload: ProjectCreateCommandPayload): Promise<ProjectListPayload>;
+    list(payload?: ProjectListCommandPayload): Promise<ProjectListPayload>;
+    update(payload: ProjectUpdateCommandPayload): Promise<ProjectListPayload>;
+    archive(payload: ProjectArchiveCommandPayload): Promise<ProjectListPayload>;
+  };
+  codeAgent: {
+    list(payload?: CodeAgentListCommandPayload): Promise<CodeAgentListPayload>;
+    upsert(profile: CodeAgentProfileInput): Promise<CodeAgentListPayload>;
+    delete(payload: CodeAgentDeleteCommandPayload): Promise<CodeAgentListPayload>;
   };
   modelConfig: {
     list(): Promise<ModelConfigSummaryListPayload>;

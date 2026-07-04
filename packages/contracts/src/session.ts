@@ -65,6 +65,7 @@ export const AgentMessageCompletedPayloadSchema = z.object({
   messageId: z.string().min(1),
   role: z.literal("assistant"),
   content: z.string(),
+  thinking: z.string().optional(),
   stopReason: z.string().min(1).optional(),
   usage: z.unknown().optional(),
   runtime: PiRuntimeRefSchema

@@ -23,7 +23,6 @@
       "@personal-claw/pi-runtime-adapter": ["packages/pi-runtime-adapter/src/index.ts"],
       "@personal-claw/chat-ui-adapter": ["packages/chat-ui-adapter/src/index.ts"],
       "@personal-claw/tool-sdk": ["packages/tool-sdk/src/index.ts"],
-      "@personal-claw/policy-engine": ["packages/policy-engine/src/index.ts"],
       "@personal-claw/scheduler": ["packages/scheduler/src/index.ts"]
     }
   }

@@ -9,7 +9,6 @@ export const DraftStepTypeSchema = z.enum([
   "agent",
   "tool",
   "human_input",
-  "approval",
   "verification",
   "notification"
 ]);
@@ -43,7 +42,7 @@ export type TaskDraftAcceptedPayload = z.infer<typeof TaskDraftAcceptedPayloadSc
 
 export const TaskDraftLoopIterationSchema = z.object({
   index: z.number().int().min(1),
-  phase: z.enum(["intake", "analysis", "plan_design", "approval_gate"]),
+  phase: z.enum(["intake", "analysis", "plan_design"]),
   status: z.enum(["done", "active", "pending"]),
   summary: z.string().min(1)
 });
@@ -57,7 +56,6 @@ export const TaskDraftStepSchema = z.object({
   title: z.string().min(1),
   goal: z.string().min(1),
   dependsOn: z.array(z.string().min(1)),
-  requiredPermissions: z.array(z.string().min(1)),
   expectedSideEffects: z.array(z.string().min(1)),
   successCriteria: z.array(z.string().min(1)),
   retryStrategy: z.string().min(1),
@@ -82,7 +80,6 @@ export const TaskDraftPreviewSchema = z.object({
   expectedArtifacts: z.array(z.string().min(1)),
   loopIterations: z.array(TaskDraftLoopIterationSchema),
   steps: z.array(TaskDraftStepSchema),
-  approvalRequired: z.boolean(),
   generatedSummary: z.string().min(1),
   createdAt: z.string().datetime()
 });

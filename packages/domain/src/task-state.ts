@@ -4,7 +4,6 @@ export const TASK_STATUSES = [
   "draft",
   "analyzing",
   "design_ready",
-  "awaiting_approval",
   "queued",
   "running",
   "paused",
@@ -21,8 +20,7 @@ export type TaskStatus = (typeof TASK_STATUSES)[number];
 const transitions: Record<TaskStatus, readonly TaskStatus[]> = {
   draft: ["analyzing", "archived", "cancelled"],
   analyzing: ["design_ready", "blocked", "failed", "cancelled"],
-  design_ready: ["awaiting_approval", "analyzing", "archived", "cancelled"],
-  awaiting_approval: ["queued", "blocked", "design_ready", "cancelled"],
+  design_ready: ["queued", "analyzing", "archived", "cancelled"],
   queued: ["running", "paused", "cancelled"],
   running: ["paused", "blocked", "verifying", "failed", "cancelled"],
   paused: ["queued", "running", "cancelled"],

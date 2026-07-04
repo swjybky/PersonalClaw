@@ -9,6 +9,26 @@ import {
   SessionPromptCommandPayloadSchema,
   TaskDraftAcceptedPayloadSchema,
   TaskDraftFromDescriptionCommandPayloadSchema,
+  CodeAgentDeleteCommandPayloadSchema,
+  CodeAgentListCommandPayloadSchema,
+  CodeAgentListPayloadSchema,
+  CodeAgentProfileInputSchema,
+  ProjectArchiveCommandPayloadSchema,
+  ProjectCreateCommandPayloadSchema,
+  ProjectListCommandPayloadSchema,
+  ProjectListPayloadSchema,
+  ProjectUpdateCommandPayloadSchema,
+  TaskAssignCodeAgentCommandPayloadSchema,
+  TaskCreateCommandPayloadSchema,
+  TaskDeleteCommandPayloadSchema,
+  TaskGetCommandPayloadSchema,
+  TaskListCommandPayloadSchema,
+  TaskListPayloadSchema,
+  TaskSetStatusCommandPayloadSchema,
+  TaskStatusViewSchema,
+  TaskSummarySchema,
+  TaskUpdateCommandPayloadSchema,
+  TaskUpdateProgressCommandPayloadSchema,
   ModelConfigSummaryListPayloadSchema,
   ModelConfigDeleteCommandPayloadSchema,
   ModelConfigEntryInputSchema,
@@ -17,6 +37,10 @@ import {
   ModelConfigTestResultPayloadSchema,
   createEnvelope,
   type CommandType,
+  type CodeAgentDeleteCommandPayload,
+  type CodeAgentListCommandPayload,
+  type CodeAgentListPayload,
+  type CodeAgentProfileInput,
   type ModelConfigDeleteCommandPayload,
   type ModelConfigEntryInput,
   type ModelConfigSetDefaultCommandPayload,
@@ -24,12 +48,28 @@ import {
   type ModelConfigTestCommandPayload,
   type ModelConfigTestResultPayload,
   type PersonalClawApi,
+  type ProjectArchiveCommandPayload,
+  type ProjectCreateCommandPayload,
+  type ProjectListCommandPayload,
+  type ProjectListPayload,
+  type ProjectUpdateCommandPayload,
   type SessionPromptAcceptedPayload,
   type SessionPromptCommandPayload,
   type SystemEventEnvelope,
   type SystemHealthPayload,
   type TaskDraftAcceptedPayload,
-  type TaskDraftFromDescriptionCommandPayload
+  type TaskDraftFromDescriptionCommandPayload,
+  type TaskAssignCodeAgentCommandPayload,
+  type TaskCreateCommandPayload,
+  type TaskDeleteCommandPayload,
+  type TaskGetCommandPayload,
+  type TaskListCommandPayload,
+  type TaskListPayload,
+  type TaskSetStatusCommandPayload,
+  type TaskStatusView,
+  type TaskSummary,
+  type TaskUpdateCommandPayload,
+  type TaskUpdateProgressCommandPayload
 } from "@personal-claw/contracts";
 
 function createBrowserId(prefix: string): string {
@@ -79,6 +119,97 @@ const api: PersonalClawApi = {
         await invokeCommand<TaskDraftAcceptedPayload>(
           "task.draftFromDescription",
           TaskDraftFromDescriptionCommandPayloadSchema.parse(payload)
+        )
+      );
+    },
+    async create(payload: TaskCreateCommandPayload): Promise<TaskSummary> {
+      return TaskSummarySchema.parse(
+        await invokeCommand<TaskSummary>("task.create", TaskCreateCommandPayloadSchema.parse(payload))
+      );
+    },
+    async list(payload: TaskListCommandPayload): Promise<TaskListPayload> {
+      return TaskListPayloadSchema.parse(
+        await invokeCommand<TaskListPayload>("task.list", TaskListCommandPayloadSchema.parse(payload))
+      );
+    },
+    async get(payload: TaskGetCommandPayload): Promise<TaskStatusView> {
+      return TaskStatusViewSchema.parse(
+        await invokeCommand<TaskStatusView>("task.get", TaskGetCommandPayloadSchema.parse(payload))
+      );
+    },
+    async update(payload: TaskUpdateCommandPayload): Promise<TaskSummary> {
+      return TaskSummarySchema.parse(
+        await invokeCommand<TaskSummary>("task.update", TaskUpdateCommandPayloadSchema.parse(payload))
+      );
+    },
+    async delete(payload: TaskDeleteCommandPayload): Promise<TaskSummary> {
+      return TaskSummarySchema.parse(
+        await invokeCommand<TaskSummary>("task.delete", TaskDeleteCommandPayloadSchema.parse(payload))
+      );
+    },
+    async setStatus(payload: TaskSetStatusCommandPayload): Promise<TaskSummary> {
+      return TaskSummarySchema.parse(
+        await invokeCommand<TaskSummary>("task.setStatus", TaskSetStatusCommandPayloadSchema.parse(payload))
+      );
+    },
+    async updateProgress(payload: TaskUpdateProgressCommandPayload): Promise<TaskSummary> {
+      return TaskSummarySchema.parse(
+        await invokeCommand<TaskSummary>(
+          "task.updateProgress",
+          TaskUpdateProgressCommandPayloadSchema.parse(payload)
+        )
+      );
+    },
+    async assignCodeAgent(payload: TaskAssignCodeAgentCommandPayload): Promise<TaskSummary> {
+      return TaskSummarySchema.parse(
+        await invokeCommand<TaskSummary>(
+          "task.assignCodeAgent",
+          TaskAssignCodeAgentCommandPayloadSchema.parse(payload)
+        )
+      );
+    }
+  },
+  project: {
+    async create(payload: ProjectCreateCommandPayload): Promise<ProjectListPayload> {
+      return ProjectListPayloadSchema.parse(
+        await invokeCommand<ProjectListPayload>("project.create", ProjectCreateCommandPayloadSchema.parse(payload))
+      );
+    },
+    async list(payload: ProjectListCommandPayload = {}): Promise<ProjectListPayload> {
+      return ProjectListPayloadSchema.parse(
+        await invokeCommand<ProjectListPayload>("project.list", ProjectListCommandPayloadSchema.parse(payload))
+      );
+    },
+    async update(payload: ProjectUpdateCommandPayload): Promise<ProjectListPayload> {
+      return ProjectListPayloadSchema.parse(
+        await invokeCommand<ProjectListPayload>("project.update", ProjectUpdateCommandPayloadSchema.parse(payload))
+      );
+    },
+    async archive(payload: ProjectArchiveCommandPayload): Promise<ProjectListPayload> {
+      return ProjectListPayloadSchema.parse(
+        await invokeCommand<ProjectListPayload>("project.archive", ProjectArchiveCommandPayloadSchema.parse(payload))
+      );
+    }
+  },
+  codeAgent: {
+    async list(payload: CodeAgentListCommandPayload = {}): Promise<CodeAgentListPayload> {
+      return CodeAgentListPayloadSchema.parse(
+        await invokeCommand<CodeAgentListPayload>("codeAgent.list", CodeAgentListCommandPayloadSchema.parse(payload))
+      );
+    },
+    async upsert(profile: CodeAgentProfileInput): Promise<CodeAgentListPayload> {
+      return CodeAgentListPayloadSchema.parse(
+        await invokeCommand<CodeAgentListPayload>(
+          "codeAgent.upsert",
+          { profile: CodeAgentProfileInputSchema.parse(profile) }
+        )
+      );
+    },
+    async delete(payload: CodeAgentDeleteCommandPayload): Promise<CodeAgentListPayload> {
+      return CodeAgentListPayloadSchema.parse(
+        await invokeCommand<CodeAgentListPayload>(
+          "codeAgent.delete",
+          CodeAgentDeleteCommandPayloadSchema.parse(payload)
         )
       );
     }

@@ -232,11 +232,7 @@ onMounted(() => {
   <section class="model-config-page" aria-label="模型配置">
     <header class="model-config-header">
       <div>
-        <p class="eyebrow">pi-ai 模型与密钥</p>
         <h1>模型配置</h1>
-        <p class="model-config-subtitle">
-          为 pi-ai 配置默认模型与 API Key。密钥仅写入主进程，Renderer 只持有 secretRef。
-        </p>
       </div>
       <div class="model-config-header-actions">
         <button

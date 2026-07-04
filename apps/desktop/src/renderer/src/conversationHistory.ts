@@ -79,7 +79,7 @@ export function buildConversationHistoryRecord(input: {
 
   return {
     id: input.id,
-    title: getConversationTitle(messages),
+    title: resolveConversationTitle(messages),
     detail: getConversationDetail(messages),
     updatedAt: input.updatedAt ?? new Date().toISOString(),
     messages
@@ -92,7 +92,7 @@ function normalizeRecords(records: readonly ConversationHistoryRecord[]): Conver
     .slice(0, maxHistoryRecords);
 }
 
-function getConversationTitle(messages: readonly UiMessage[]): string {
+export function resolveConversationTitle(messages: readonly UiMessage[]): string {
   const firstUserMessage = messages.find((message) => message.role === "user");
   const titleSource = firstUserMessage?.content ?? messages.find((message) => message.content.trim())?.content;
 
@@ -141,7 +141,8 @@ function isUiMessage(value: unknown): value is UiMessage {
     typeof value.id === "string" &&
     isUiMessageRole(value.role) &&
     typeof value.content === "string" &&
-    typeof value.createdAt === "string"
+    typeof value.createdAt === "string" &&
+    (value.thinking === undefined || typeof value.thinking === "string")
   );
 }
 

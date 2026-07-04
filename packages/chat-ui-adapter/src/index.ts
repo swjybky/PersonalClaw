@@ -1,12 +1,20 @@
 import type { AgentMessage, MessageEditor, MessageList } from "@earendil-works/pi-web-ui";
 import "@earendil-works/pi-web-ui/app.css";
+import "./markdown-content";
 import { registerAdapterMessageElements } from "./pi-web-message-elements";
+
+export { prepareMarkdownContent } from "./markdown-content";
 
 export interface UiMessage {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
   createdAt: string;
+  /**
+   * 助手消息的思考过程文本，由 agent.thinking_delta 流式累积。
+   * 仅用于在助手消息内联展示可折叠的 "Thinking" 块，不参与 Core 的领域持久化。
+   */
+  thinking?: string;
 }
 
 export interface UiToolCall {

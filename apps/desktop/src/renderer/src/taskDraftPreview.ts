@@ -23,8 +23,7 @@ export function buildTaskProgressItems(
     return [
       { id: "task-intake", label: "Task intake", status: "done" },
       { id: "task-analysis", label: "Loop analysis", status: "done" },
-      { id: "task-plan", label: "Draft plan", status: "done" },
-      { id: "task-approval", label: "User approval", status: "active" }
+      { id: "task-plan", label: "Draft plan", status: "done" }
     ];
   }
 
@@ -32,16 +31,14 @@ export function buildTaskProgressItems(
     return [
       { id: "task-intake", label: "Task intake", status: "done" },
       { id: "task-analysis", label: "Loop analysis", status: "active" },
-      { id: "task-plan", label: "Draft plan", status: "pending" },
-      { id: "task-approval", label: "User approval", status: "pending" }
+      { id: "task-plan", label: "Draft plan", status: "pending" }
     ];
   }
 
   return [
     { id: "task-intake", label: "Task intake", status: "active" },
     { id: "task-analysis", label: "Loop analysis", status: "pending" },
-    { id: "task-plan", label: "Draft plan", status: "pending" },
-    { id: "task-approval", label: "User approval", status: "pending" }
+    { id: "task-plan", label: "Draft plan", status: "pending" }
   ];
 }
 
@@ -65,7 +62,7 @@ export function summarizeTaskDraft(draft: TaskDraftPreview | null): TaskDraftSum
     missingInformation: draft.missingInformation.length
       ? `${draft.missingInformation.length} item(s)`
       : "None",
-    nextStep: draft.approvalRequired ? "Review the draft before execution" : "Ready for review"
+    nextStep: "Ready for review"
   };
 }
 

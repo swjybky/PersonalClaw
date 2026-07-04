@@ -13,7 +13,7 @@ const rules = [
       /\bfrom\s+["']node:/,
       /better-sqlite3|drizzle-orm/,
       /@earendil-works\/pi/,
-      /@personal-claw\/(application|infrastructure-sqlite|pi-runtime-adapter|policy-engine|scheduler|tool-sdk)/
+      /@personal-claw\/(application|infrastructure-sqlite|pi-runtime-adapter|scheduler|tool-sdk)/
     ]
   },
   {
@@ -24,14 +24,14 @@ const rules = [
       /\bfrom\s+["']vue["']/,
       /better-sqlite3|drizzle-orm/,
       /@earendil-works\/pi/,
-      /@personal-claw\/(infrastructure-sqlite|pi-runtime-adapter|policy-engine|scheduler|tool-sdk)/
+      /@personal-claw\/(infrastructure-sqlite|pi-runtime-adapter|scheduler|tool-sdk)/
     ]
   },
   {
     name: "main stays out of business adapters",
     dir: "apps/desktop/src/main",
     forbidden: [
-      /@personal-claw\/(domain|infrastructure-sqlite|pi-runtime-adapter|chat-ui-adapter|tool-sdk|policy-engine|scheduler)/,
+      /@personal-claw\/(domain|infrastructure-sqlite|pi-runtime-adapter|chat-ui-adapter|tool-sdk|scheduler)/,
       /better-sqlite3|drizzle-orm/,
       /@earendil-works\/pi/
     ]

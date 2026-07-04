@@ -1,5 +1,8 @@
 import {
+  CommandEnvelopeSchema,
+  CommandResultSchema,
   createEnvelope,
+  type CommandEnvelope,
   type CommandResult,
   type ModelConfigTestResultPayload,
   type PiRuntimeRef,
@@ -8,7 +11,13 @@ import {
   type TaskDraftStep
 } from "@personal-claw/contracts";
 import { createId, nowIso } from "@personal-claw/shared";
-import { PiAgentRuntimeAdapter, createPiModelRefFromEnv, type AgentRuntimeEvent } from "@personal-claw/pi-runtime-adapter";
+import {
+  PiAgentRuntimeAdapter,
+  createPiModelRefFromEnv,
+  type AgentRuntimeEvent,
+  type TaskToolExecutor,
+  type TaskToolExecutionInput
+} from "@personal-claw/pi-runtime-adapter";
 import { ModelConfigFileReader } from "./model-config-reader";
 import { bootUtility } from "./runtime";
 
@@ -16,6 +25,17 @@ const envModelRef = createPiModelRefFromEnv(process.env);
 const modelConfigReader = new ModelConfigFileReader(process.env.PERSONAL_CLAW_USER_DATA_DIR);
 const requestTimeoutMs = readPositiveInteger(process.env.PERSONAL_CLAW_AGENT_PROMPT_TIMEOUT_MS);
 const forceFauxProvider = process.env.PERSONAL_CLAW_PI_FORCE_FAUX === "1";
+const coreToolCommandTimeoutMs = readPositiveInteger(process.env.PERSONAL_CLAW_CORE_TOOL_TIMEOUT_MS) ?? 60_000;
+
+interface PendingCoreCommand {
+  resolve(value: CommandResult): void;
+  reject(error: Error): void;
+  timer: NodeJS.Timeout;
+  abortListener?: () => void;
+  signal?: AbortSignal;
+}
+
+const pendingCoreCommands = new Map<string, PendingCoreCommand>();
 
 const runtime = new PiAgentRuntimeAdapter({
   ...(forceFauxProvider
@@ -35,8 +55,13 @@ const runtime = new PiAgentRuntimeAdapter({
   apiKeyResolver: (provider) => {
     const resolved = modelConfigReader.resolveDefault();
     return resolved && resolved.provider === provider ? resolved.apiKey : undefined;
-  }
+  },
+  taskToolExecutor: executeCoreTaskTool
 });
+
+if (process.parentPort) {
+  process.parentPort.on("message", handleCoreCommandResultMessage);
+}
 
 function readPositiveInteger(value: string | undefined): number | undefined {
   if (!value) {
@@ -46,6 +71,210 @@ function readPositiveInteger(value: string | undefined): number | undefined {
   const parsed = Number.parseInt(value, 10);
 
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function unwrapMessage(message: unknown): unknown {
+  if (isRecord(message) && "data" in message) {
+    return message.data;
+  }
+
+  return message;
+}
+
+function readString(value: Record<string, unknown>, key: string): string | undefined {
+  return typeof value[key] === "string" ? value[key] : undefined;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function cleanupPendingCoreCommand(requestId: string): PendingCoreCommand | undefined {
+  const pending = pendingCoreCommands.get(requestId);
+
+  if (!pending) {
+    return undefined;
+  }
+
+  clearTimeout(pending.timer);
+  if (pending.abortListener) {
+    pending.signal?.removeEventListener("abort", pending.abortListener);
+  }
+  pendingCoreCommands.delete(requestId);
+  return pending;
+}
+
+function handleCoreCommandResultMessage(message: unknown): void {
+  const raw = unwrapMessage(message);
+
+  if (!isRecord(raw) || raw.kind !== "utility.core_command.result" || raw.worker !== "agent") {
+    return;
+  }
+
+  const requestId = readString(raw, "requestId");
+  const pending = requestId ? cleanupPendingCoreCommand(requestId) : undefined;
+
+  if (!requestId || !pending) {
+    return;
+  }
+
+  const parsed = CommandResultSchema.safeParse(raw.result);
+
+  if (parsed.success) {
+    pending.resolve(parsed.data);
+    return;
+  }
+
+  pending.reject(new Error("Core command bridge returned an invalid CommandResult."));
+}
+
+function normalizeTaskToolPayload(input: TaskToolExecutionInput): Record<string, unknown> {
+  const payload = isRecord(input.args) ? { ...input.args } : {};
+
+  if (
+    (input.commandType === "task.create" || input.commandType === "task.list") &&
+    !isNonEmptyString(payload.projectId) &&
+    input.projectId
+  ) {
+    payload.projectId = input.projectId;
+  }
+
+  if (
+    (input.commandType === "task.get" ||
+      input.commandType === "task.update" ||
+      input.commandType === "task.setStatus" ||
+      input.commandType === "task.updateProgress") &&
+    !isNonEmptyString(payload.id) &&
+    input.taskId
+  ) {
+    payload.id = input.taskId;
+  }
+
+  if (input.commandType === "task.create" && !isRecord(payload.source)) {
+    payload.source = {
+      kind: "conversation",
+      label: "AI conversation",
+      ...(input.sessionId ? { referenceId: input.sessionId } : {})
+    };
+  }
+
+  if (input.commandType === "task.setStatus" && !isNonEmptyString(payload.status)) {
+    payload.status = "queued";
+  }
+
+  return payload;
+}
+
+function createCoreCommandForTaskTool(input: TaskToolExecutionInput): CommandEnvelope {
+  const payload = normalizeTaskToolPayload(input);
+
+  return CommandEnvelopeSchema.parse(
+    createEnvelope(input.commandType, payload, {
+      id: createId("cmd_tool"),
+      context: {
+        correlationId: input.toolCallId,
+        ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+        ...(input.runId ? { runId: input.runId } : {}),
+        ...(input.projectId ? { projectId: input.projectId } : {}),
+        ...(input.taskId ? { taskId: input.taskId } : {})
+      }
+    })
+  );
+}
+
+function requestCoreCommand(command: CommandEnvelope, signal?: AbortSignal): Promise<CommandResult> {
+  const port = process.parentPort;
+
+  if (!port) {
+    return Promise.resolve({
+      status: "rejected",
+      requestId: command.id,
+      error: {
+        code: "agent.core_bridge_unavailable",
+        message: "Agent utility cannot reach the Core command bridge."
+      }
+    });
+  }
+
+  if (signal?.aborted) {
+    return Promise.reject(new Error(`Core command aborted before dispatch: ${command.type}`));
+  }
+
+  return new Promise<CommandResult>((resolve, reject) => {
+    const requestId = command.id;
+    const timer = setTimeout(() => {
+      cleanupPendingCoreCommand(requestId);
+      reject(new Error(`Core command timed out: ${command.type}`));
+    }, coreToolCommandTimeoutMs);
+    const abortListener = signal
+      ? () => {
+          cleanupPendingCoreCommand(requestId);
+          reject(new Error(`Core command aborted: ${command.type}`));
+        }
+      : undefined;
+
+    timer.unref();
+    if (signal && abortListener) {
+      signal.addEventListener("abort", abortListener, { once: true });
+    }
+
+    pendingCoreCommands.set(requestId, {
+      resolve,
+      reject,
+      timer,
+      ...(abortListener ? { abortListener } : {}),
+      ...(signal ? { signal } : {})
+    });
+
+    port.postMessage({
+      kind: "utility.core_command.request",
+      worker: "agent",
+      requestId,
+      command
+    });
+  });
+}
+
+function stringifyToolPayload(value: unknown): string {
+  const text = JSON.stringify(value, null, 2);
+
+  if (text.length <= 4000) {
+    return text;
+  }
+
+  return `${text.slice(0, 4000)}\n...`;
+}
+
+async function executeCoreTaskTool(
+  input: TaskToolExecutionInput
+): Promise<Awaited<ReturnType<TaskToolExecutor>>> {
+  const command = createCoreCommandForTaskTool(input);
+  const result = await requestCoreCommand(command, input.signal);
+
+  if (result.status === "accepted") {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Core accepted ${input.toolName} (${input.commandType}).\n\n${stringifyToolPayload(result.payload)}`
+        }
+      ],
+      details: {
+        toolName: input.toolName,
+        commandType: input.commandType,
+        routedThrough: "core",
+        status: "accepted",
+        requestId: result.requestId,
+        payload: result.payload
+      }
+    };
+  }
+
+  throw new Error(`Core rejected ${input.toolName} (${input.commandType}): ${result.error.message}`);
 }
 
 function toEventEnvelope(event: AgentRuntimeEvent, correlationId: string): SystemEventEnvelope {
@@ -99,6 +328,7 @@ function toEventEnvelope(event: AgentRuntimeEvent, correlationId: string): Syste
         role: "assistant" as const,
         content: event.payload.content,
         runtime: event.payload.runtime,
+        ...(event.payload.thinking ? { thinking: event.payload.thinking } : {}),
         ...(event.payload.stopReason ? { stopReason: event.payload.stopReason } : {}),
         ...(event.payload.usage ? { usage: event.payload.usage } : {})
       },
@@ -148,6 +378,7 @@ function streamPrompt(
   input: {
     runId: string;
     sessionId: string;
+    projectId?: string;
     taskId?: string;
     prompt: string;
     thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high";
@@ -194,15 +425,14 @@ function buildTaskDraftPrompt(description: string, maxIterations: number): strin
   return [
     "You are the PersonalClaw loop agent for task intake.",
     "Turn the user's natural-language description into an executable task draft.",
-    "Stay inside draft mode: do not execute tools, do not claim persistent state was created, and do not skip approval.",
-    `Run at most ${maxIterations} loop passes: intake, analysis, plan design, approval gate.`,
+    "Stay inside draft mode: do not claim persistent state was created.",
+    `Run at most ${maxIterations} loop passes: intake, analysis, plan design.`,
     "",
     "Return a concise draft with these sections:",
     "1. Objective",
     "2. Missing information",
     "3. Suggested automation level",
     "4. Draft steps",
-    "5. Approval notes",
     "",
     "User description:",
     description
@@ -228,7 +458,6 @@ function buildTaskDraftPreview(input: {
       title: "Confirm task boundary",
       goal: "Confirm the project, expected result, deadline, and what the assistant may inspect.",
       dependsOn: [],
-      requiredPermissions: [],
       expectedSideEffects: [],
       successCriteria: ["User confirms scope and completion criteria."],
       retryStrategy: "Ask one focused clarification round if scope is still ambiguous.",
@@ -241,7 +470,6 @@ function buildTaskDraftPreview(input: {
       title: "Refine analysis",
       goal: "Convert the confirmed objective into constraints, assumptions, risks, and deliverables.",
       dependsOn: [`${stepSeed}_1`],
-      requiredPermissions: [],
       expectedSideEffects: [],
       successCriteria: ["Task analysis is editable and reviewable by the user."],
       retryStrategy: "Regenerate the analysis from the latest confirmed description.",
@@ -252,26 +480,12 @@ function buildTaskDraftPreview(input: {
       sequence: 3,
       type: "agent",
       title: "Draft execution plan",
-      goal: "Create ordered steps with dependencies, verification checks, and approval gates.",
+      goal: "Create ordered steps with dependencies and verification checks.",
       dependsOn: [`${stepSeed}_2`],
-      requiredPermissions: [],
       expectedSideEffects: [],
       successCriteria: ["Every step has a clear goal, dependency, and success criterion."],
       retryStrategy: "Split any vague step into smaller reviewable steps.",
-      rollbackNotes: "Keep the prior plan version until the new draft is approved."
-    },
-    {
-      id: `${stepSeed}_4`,
-      sequence: 4,
-      type: "approval",
-      title: "Request plan approval",
-      goal: "Wait for the user to approve or edit the draft before any execution phase.",
-      dependsOn: [`${stepSeed}_3`],
-      requiredPermissions: ["user.plan_approval"],
-      expectedSideEffects: [],
-      successCriteria: ["The user explicitly approves the plan version."],
-      retryStrategy: "Return to plan editing if the user rejects or changes the draft.",
-      rollbackNotes: "Unapproved plans never execute tools."
+      rollbackNotes: "Keep the prior plan version until the new draft is reviewed."
     }
   ];
 
@@ -287,11 +501,10 @@ function buildTaskDraftPreview(input: {
     suggestedAutomationLevel: "L0",
     assumptions: [
       "The draft is a review artifact, not a persisted Task/Plan/Run state.",
-      "No tools are executed until a later Policy Engine and approval path allow them."
+      "Tools execute via the Tool Utility; persistence is owned by Core in a later phase."
     ],
     constraints: [
       "Renderer has no Node, filesystem, SQLite, key, or pi SDK access.",
-      "Tool calls remain blocked before Policy Engine approval.",
       "Task/Plan/Run persistence must be owned by Core in a later phase."
     ],
     missingInformation: [
@@ -300,7 +513,7 @@ function buildTaskDraftPreview(input: {
       "Deadline or priority",
       "Allowed context and data sources"
     ],
-    expectedArtifacts: ["Editable task analysis", "Draft plan steps", "Approval-ready task summary"],
+    expectedArtifacts: ["Editable task analysis", "Draft plan steps"],
     loopIterations: [
       {
         index: 1,
@@ -319,16 +532,9 @@ function buildTaskDraftPreview(input: {
         phase: "plan_design",
         status: "done",
         summary: "Prepared a non-executing plan preview with dependencies and verification."
-      },
-      {
-        index: 4,
-        phase: "approval_gate",
-        status: "active",
-        summary: "Waiting for user review before any future execution path."
       }
     ],
     steps,
-    approvalRequired: true,
     generatedSummary: input.assistantText.trim() || "The loop agent produced an empty draft summary.",
     createdAt: input.createdAt
   };
@@ -553,6 +759,7 @@ bootUtility("agent", {
       {
         runId,
         sessionId: command.payload.sessionId,
+        ...(command.payload.projectId ? { projectId: command.payload.projectId } : {}),
         ...(command.payload.taskId ? { taskId: command.payload.taskId } : {}),
         prompt: command.payload.message,
         ...(command.payload.thinkingLevel ? { thinkingLevel: command.payload.thinkingLevel } : {})

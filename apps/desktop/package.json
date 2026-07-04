@@ -5,18 +5,22 @@
   "type": "module",
   "main": "out/main/index.js",
   "scripts": {
-    "dev": "electron-vite dev",
-    "build": "electron-vite build",
-    "preview": "electron-vite preview",
-    "smoke": "node scripts/run-preview.mjs smoke",
-    "smoke:renderer": "node scripts/run-preview.mjs renderer-smoke"
+    "dev": "pnpm run rebuild:native && electron-vite dev",
+    "build": "pnpm run rebuild:native && electron-vite build",
+    "preview": "pnpm run rebuild:native && electron-vite preview",
+    "rebuild:native": "node scripts/rebuild-native.mjs electron",
+    "rebuild:native:node": "node scripts/rebuild-native.mjs node",
+    "smoke": "pnpm run rebuild:native && node scripts/run-preview.mjs smoke",
+    "smoke:renderer": "pnpm run rebuild:native && node scripts/run-preview.mjs renderer-smoke"
   },
   "dependencies": {
     "@personal-claw/application": "workspace:*",
     "@personal-claw/chat-ui-adapter": "workspace:*",
     "@personal-claw/contracts": "workspace:*",
+    "@personal-claw/infrastructure-sqlite": "workspace:*",
     "@personal-claw/pi-runtime-adapter": "workspace:*",
     "@personal-claw/shared": "workspace:*",
+    "better-sqlite3": "12.11.1",
     "naive-ui": "2.44.1",
     "pinia": "3.0.4",
     "vue": "3.5.39"
@@ -46,7 +50,9 @@
       {
         "from": "resources",
         "to": "resources",
-        "filter": ["*.png"]
+        "filter": [
+          "*.png"
+        ]
       }
     ],
     "linux": {

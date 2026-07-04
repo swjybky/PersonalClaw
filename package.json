@@ -11,10 +11,12 @@
   "scripts": {
     "dev": "pnpm --filter @personal-claw/desktop dev",
     "build": "pnpm --filter @personal-claw/desktop build",
-    "typecheck": "vue-tsc --noEmit -p apps/desktop/tsconfig.web.json && tsc --noEmit -p apps/desktop/tsconfig.node.json && tsc --noEmit -p packages/contracts/tsconfig.json && tsc --noEmit -p packages/shared/tsconfig.json && tsc --noEmit -p packages/domain/tsconfig.json && tsc --noEmit -p packages/application/tsconfig.json && tsc --noEmit -p packages/infrastructure-sqlite/tsconfig.json && tsc --noEmit -p packages/pi-runtime-adapter/tsconfig.json && tsc --noEmit -p packages/chat-ui-adapter/tsconfig.json && tsc --noEmit -p packages/tool-sdk/tsconfig.json && tsc --noEmit -p packages/policy-engine/tsconfig.json && tsc --noEmit -p packages/scheduler/tsconfig.json",
-    "test": "vitest run",
+    "typecheck": "vue-tsc --noEmit -p apps/desktop/tsconfig.web.json && tsc --noEmit -p apps/desktop/tsconfig.node.json && tsc --noEmit -p packages/contracts/tsconfig.json && tsc --noEmit -p packages/shared/tsconfig.json && tsc --noEmit -p packages/domain/tsconfig.json && tsc --noEmit -p packages/application/tsconfig.json && tsc --noEmit -p packages/infrastructure-sqlite/tsconfig.json && tsc --noEmit -p packages/pi-runtime-adapter/tsconfig.json && tsc --noEmit -p packages/chat-ui-adapter/tsconfig.json && tsc --noEmit -p packages/tool-sdk/tsconfig.json && tsc --noEmit -p packages/scheduler/tsconfig.json",
+    "test": "pnpm rebuild:native:node && vitest run",
     "lint": "pnpm lint:boundaries",
     "lint:boundaries": "node tools/check-renderer-boundary.mjs && node tools/check-package-boundaries.mjs",
+    "rebuild:native": "pnpm --filter @personal-claw/desktop rebuild:native",
+    "rebuild:native:node": "pnpm --filter @personal-claw/desktop rebuild:native:node",
     "smoke": "pnpm --filter @personal-claw/desktop smoke",
     "smoke:renderer": "pnpm --filter @personal-claw/desktop smoke:renderer",
     "verify": "pnpm typecheck && pnpm lint && pnpm test"

@@ -3,6 +3,8 @@ import {
   AgentMessageCompletedEventEnvelopeSchema,
   AgentThinkingDeltaEventEnvelopeSchema,
   CommandEnvelopeSchema,
+  TaskCreatedEventEnvelopeSchema,
+  TaskStatusChangedEventEnvelopeSchema,
   SessionPromptAcceptedPayloadSchema,
   SystemHealthPayloadSchema,
   createEnvelope
@@ -127,5 +129,94 @@ describe("IPC envelope contracts", () => {
     );
 
     expect(AgentMessageCompletedEventEnvelopeSchema.parse(envelope).payload.role).toBe("assistant");
+  });
+
+  it("accepts project-bound task create commands", () => {
+    const envelope = createEnvelope(
+      "task.create",
+      {
+        projectId: "project_1",
+        title: "搭建任务系统",
+        goal: "创建可持久化、可追踪的个人任务",
+        source: {
+          kind: "manual",
+          label: "右侧任务列表"
+        },
+        priority: "normal"
+      },
+      {
+        id: "cmd_task_create_1",
+        context: {
+          correlationId: "cmd_task_create_1",
+          projectId: "project_1"
+        }
+      }
+    );
+
+    expect(CommandEnvelopeSchema.parse(envelope).type).toBe("task.create");
+  });
+
+  it("accepts task created and status changed events", () => {
+    const task = {
+      id: "task_1",
+      projectId: "project_1",
+      ownerId: "local-user",
+      title: "搭建任务系统",
+      goal: "创建可持久化、可追踪的个人任务",
+      status: "draft",
+      progressPercent: 0,
+      source: {
+        kind: "manual"
+      },
+      priority: "normal",
+      dueAt: null,
+      codeAgentId: null,
+      blockedReason: null,
+      nextStep: "Define the first executable step.",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      archivedAt: null,
+      version: 1
+    };
+
+    const created = createEnvelope(
+      "task.created",
+      { task },
+      {
+        id: "evt_task_created_1",
+        context: {
+          correlationId: "cmd_task_create_1",
+          projectId: "project_1",
+          taskId: "task_1"
+        }
+      }
+    );
+
+    expect(TaskCreatedEventEnvelopeSchema.parse(created).payload.task.projectId).toBe("project_1");
+
+    const changed = createEnvelope(
+      "task.status_changed",
+      {
+        taskId: "task_1",
+        projectId: "project_1",
+        fromStatus: "draft",
+        toStatus: "analyzing",
+        task: {
+          ...task,
+          status: "analyzing",
+          version: 2
+        }
+      },
+      {
+        id: "evt_task_status_1",
+        context: {
+          correlationId: "cmd_task_status_1",
+          projectId: "project_1",
+          taskId: "task_1"
+        }
+      }
+    );
+
+    expect(TaskStatusChangedEventEnvelopeSchema.parse(changed).payload.toStatus).toBe("analyzing");
   });
 });

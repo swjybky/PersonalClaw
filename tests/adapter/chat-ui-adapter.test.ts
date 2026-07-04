@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   configurePiWebMessageList,
   piWebUiAdapterStatus,
+  prepareMarkdownContent,
   registerPiWebUiElements,
   toPiWebMessages,
   type PiWebMessageListElement
@@ -56,6 +57,16 @@ describe("chat UI adapter", () => {
         }
       ]
     });
+  });
+
+  it("preserves single line breaks for markdown rendering", () => {
+    expect(prepareMarkdownContent("第一行\n第二行")).toBe("第一行\n第二行");
+    expect(prepareMarkdownContent("第一段\n\n第二段")).toBe("第一段\n\n第二段");
+  });
+
+  it("inserts line breaks after Chinese sentence punctuation in dense text", () => {
+    expect(prepareMarkdownContent("第一句。第二句")).toBe("第一句。\n第二句");
+    expect(prepareMarkdownContent("```code\nline```")).toBe("```code\nline```");
   });
 
   it("does not register browser custom elements in the node test process", async () => {

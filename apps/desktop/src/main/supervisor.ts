@@ -1,6 +1,7 @@
 import { utilityProcess, type UtilityProcess } from "electron";
 import { join } from "node:path";
 import {
+  CommandEnvelopeSchema,
   CommandResultSchema,
   SystemEventEnvelopeSchema,
   type CommandEnvelope,
@@ -35,6 +36,11 @@ interface UtilitySupervisorOptions {
   onUtilityEvent(event: SystemEventEnvelope): void;
 }
 
+type UtilityCoreCommandRouter = (
+  sourceWorker: UtilityWorkerName,
+  command: CommandEnvelope
+) => Promise<CommandResult>;
+
 const logger = createLogger({ process: "main", workerId: "utility-supervisor" });
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -65,6 +71,7 @@ class UtilityWorkerProcess {
     private readonly entryPath: string,
     private readonly onUnexpectedExit: (worker: UtilityWorkerName, reason: string) => void,
     private readonly onUtilityEvent: (event: SystemEventEnvelope) => void,
+    private readonly routeCoreCommand: UtilityCoreCommandRouter,
     private readonly env: NodeJS.ProcessEnv = {}
   ) {}
 
@@ -282,6 +289,11 @@ class UtilityWorkerProcess {
       return;
     }
 
+    if (kind === "utility.core_command.request") {
+      void this.handleCoreCommandRequest(message);
+      return;
+    }
+
     if (kind === "utility.command.event") {
       const parsed = SystemEventEnvelopeSchema.safeParse(message.event);
 
@@ -295,6 +307,45 @@ class UtilityWorkerProcess {
 
     if (kind === "utility.error") {
       logger.error({ worker: this.worker, message }, "utility reported error");
+    }
+  }
+
+  private async handleCoreCommandRequest(message: Record<string, unknown>): Promise<void> {
+    const requestId = readString(message, "requestId") ?? "unknown";
+    const parsed = CommandEnvelopeSchema.safeParse(message.command);
+    const postResult = (result: CommandResult): void => {
+      this.child?.postMessage({
+        kind: "utility.core_command.result",
+        worker: this.worker,
+        requestId,
+        result
+      });
+    };
+
+    if (!parsed.success) {
+      postResult({
+        status: "rejected",
+        requestId,
+        error: {
+          code: "utility.invalid_core_command",
+          message: "Utility core command bridge received an invalid command envelope.",
+          details: parsed.error.flatten()
+        }
+      });
+      return;
+    }
+
+    try {
+      postResult(await this.routeCoreCommand(this.worker, parsed.data));
+    } catch (error: unknown) {
+      postResult({
+        status: "rejected",
+        requestId,
+        error: {
+          code: "utility.core_command_failed",
+          message: error instanceof Error ? error.message : "Core command bridge failed."
+        }
+      });
     }
   }
 
@@ -335,6 +386,7 @@ export class UtilitySupervisor {
         join(__dirname, "utilities", `${worker}-entry.js`),
         options.onUnexpectedExit,
         options.onUtilityEvent,
+        (sourceWorker, command) => this.routeCoreCommand(sourceWorker, command),
         this.env
       );
 
@@ -393,5 +445,31 @@ export class UtilitySupervisor {
     }
 
     return target.requestCommand(command, timeoutMs);
+  }
+
+  private routeCoreCommand(sourceWorker: UtilityWorkerName, command: CommandEnvelope): Promise<CommandResult> {
+    if (sourceWorker === "core") {
+      return Promise.resolve({
+        status: "rejected",
+        requestId: command.id,
+        error: {
+          code: "utility.core_bridge_loop",
+          message: "Core utility cannot route a command back through the Core bridge."
+        }
+      });
+    }
+
+    if (!command.type.startsWith("task.") || command.type === "task.draftFromDescription") {
+      return Promise.resolve({
+        status: "rejected",
+        requestId: command.id,
+        error: {
+          code: "utility.core_bridge_forbidden_command",
+          message: `Core command bridge only accepts task persistence commands, got ${command.type}.`
+        }
+      });
+    }
+
+    return this.requestCommand("core", command);
   }
 }

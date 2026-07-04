@@ -7,10 +7,9 @@
 3. Renderer 禁止访问 Node、SQLite、pi SDK、文件系统和密钥。
 4. Main 禁止承载领域业务和直接写业务数据库。
 5. 只有 Core 可以改变 Task/Plan/Run 的持久化状态。
-6. Tool Call 未通过 Policy Engine 不得执行；不允许用提示词代替权限判断。
-7. 所有跨进程 payload 必须有 schema、protocolVersion 和 correlationId。
-8. 不允许使用 `any` 绕过核心协议类型；不允许吞掉异常。
-9. 所有外部依赖固定版本，升级 pi 或 Electron 时先建立兼容测试和 ADR。
-10. 每完成一个垂直功能，必须补充单元测试、契约测试和最小 E2E。
-11. 不实现架构文档“首版非目标”中的功能，除非用户明确新增需求。
-12. 发现架构冲突时，先记录 ADR 和影响面，再提出修改，不可静默偏离。
+6. 所有跨进程 payload 必须有 schema、protocolVersion 和 correlationId。
+7. 不允许使用 `any` 绕过核心协议类型；不允许吞掉异常。
+8. 所有外部依赖固定版本，升级 pi 或 Electron 时先建立兼容测试和 ADR。
+9. 每完成一个垂直功能，必须补充单元测试、契约测试和最小 E2E。
+10. 不实现架构文档“首版非目标”中的功能，除非用户明确新增需求。
+11. 发现架构冲突时，先记录 ADR 和影响面，再提出修改，不可静默偏离。

@@ -25,6 +25,37 @@ import {
   TaskDraftFromDescriptionCommandEnvelopeSchema,
   type TaskDraftCreatedEventEnvelope
 } from "./task-draft";
+import {
+  CodeAgentDeleteCommandEnvelopeSchema,
+  CodeAgentListCommandEnvelopeSchema,
+  CodeAgentUpdatedEventEnvelopeSchema,
+  CodeAgentUpsertCommandEnvelopeSchema,
+  ProjectArchiveCommandEnvelopeSchema,
+  ProjectCreateCommandEnvelopeSchema,
+  ProjectCreatedEventEnvelopeSchema,
+  ProjectListCommandEnvelopeSchema,
+  ProjectUpdateCommandEnvelopeSchema,
+  TaskArchivedEventEnvelopeSchema,
+  TaskAssignCodeAgentCommandEnvelopeSchema,
+  TaskCreateCommandEnvelopeSchema,
+  TaskCreatedEventEnvelopeSchema,
+  TaskDeleteCommandEnvelopeSchema,
+  TaskGetCommandEnvelopeSchema,
+  TaskListCommandEnvelopeSchema,
+  TaskProgressChangedEventEnvelopeSchema,
+  TaskSetStatusCommandEnvelopeSchema,
+  TaskStatusChangedEventEnvelopeSchema,
+  TaskUpdateCommandEnvelopeSchema,
+  TaskUpdateProgressCommandEnvelopeSchema,
+  TaskUpdatedEventEnvelopeSchema,
+  type CodeAgentUpdatedEventEnvelope,
+  type ProjectCreatedEventEnvelope,
+  type TaskArchivedEventEnvelope,
+  type TaskCreatedEventEnvelope,
+  type TaskProgressChangedEventEnvelope,
+  type TaskStatusChangedEventEnvelope,
+  type TaskUpdatedEventEnvelope
+} from "./task-core";
 
 export const UtilityWorkerNameSchema = z.enum(["core", "agent", "tool"]);
 export type UtilityWorkerName = z.infer<typeof UtilityWorkerNameSchema>;
@@ -76,6 +107,21 @@ export const CommandEnvelopeSchema = z.discriminatedUnion("type", [
   SystemHealthCommandEnvelopeSchema,
   SessionPromptCommandEnvelopeSchema,
   TaskDraftFromDescriptionCommandEnvelopeSchema,
+  ProjectCreateCommandEnvelopeSchema,
+  ProjectListCommandEnvelopeSchema,
+  ProjectUpdateCommandEnvelopeSchema,
+  ProjectArchiveCommandEnvelopeSchema,
+  TaskCreateCommandEnvelopeSchema,
+  TaskListCommandEnvelopeSchema,
+  TaskGetCommandEnvelopeSchema,
+  TaskUpdateCommandEnvelopeSchema,
+  TaskDeleteCommandEnvelopeSchema,
+  TaskSetStatusCommandEnvelopeSchema,
+  TaskUpdateProgressCommandEnvelopeSchema,
+  TaskAssignCodeAgentCommandEnvelopeSchema,
+  CodeAgentListCommandEnvelopeSchema,
+  CodeAgentUpsertCommandEnvelopeSchema,
+  CodeAgentDeleteCommandEnvelopeSchema,
   ModelConfigListCommandEnvelopeSchema,
   ModelConfigUpsertCommandEnvelopeSchema,
   ModelConfigDeleteCommandEnvelopeSchema,
@@ -137,7 +183,14 @@ export const SystemEventEnvelopeSchema = z.discriminatedUnion("type", [
   AgentMessageCompletedEventEnvelopeSchema,
   AgentToolRequestedEventEnvelopeSchema,
   AgentErrorEventEnvelopeSchema,
-  TaskDraftCreatedEventEnvelopeSchema
+  TaskDraftCreatedEventEnvelopeSchema,
+  ProjectCreatedEventEnvelopeSchema,
+  TaskCreatedEventEnvelopeSchema,
+  TaskUpdatedEventEnvelopeSchema,
+  TaskStatusChangedEventEnvelopeSchema,
+  TaskProgressChangedEventEnvelopeSchema,
+  TaskArchivedEventEnvelopeSchema,
+  CodeAgentUpdatedEventEnvelopeSchema
 ]);
 
 export type SystemEventEnvelope =
@@ -157,4 +210,11 @@ export type SystemEventEnvelope =
   | AgentMessageCompletedEventEnvelope
   | AgentToolRequestedEventEnvelope
   | AgentErrorEventEnvelope
-  | TaskDraftCreatedEventEnvelope;
+  | TaskDraftCreatedEventEnvelope
+  | ProjectCreatedEventEnvelope
+  | TaskCreatedEventEnvelope
+  | TaskUpdatedEventEnvelope
+  | TaskStatusChangedEventEnvelope
+  | TaskProgressChangedEventEnvelope
+  | TaskArchivedEventEnvelope
+  | CodeAgentUpdatedEventEnvelope;

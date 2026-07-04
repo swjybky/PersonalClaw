@@ -23,6 +23,7 @@ import { moonshotaiCnProvider } from "@earendil-works/pi-ai/providers/moonshotai
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { xiaomiTokenPlanCnProvider } from "@earendil-works/pi-ai/providers/xiaomi-token-plan-cn";
 import { zaiCodingCnProvider } from "@earendil-works/pi-ai/providers/zai-coding-cn";
+import { createPersonalTaskTools, type TaskToolExecutor } from "./task-tools";
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high";
 
@@ -62,6 +63,7 @@ export interface PiRuntimeRef {
 export interface AgentRunInput {
   runId: string;
   sessionId?: string;
+  projectId?: string;
   taskId?: string;
   prompt: string;
   thinkingLevel?: ThinkingLevel;
@@ -96,6 +98,7 @@ export type AgentRuntimeEvent =
       payload: {
         messageId: string;
         content: string;
+        thinking?: string;
         stopReason?: string;
         usage?: Usage;
         runtime: PiRuntimeRef;
@@ -146,6 +149,7 @@ interface PiRuntimeAdapterOptions {
   modelRefResolver?: () => PiModelRef | undefined;
   apiKeyResolver?: (provider: SupportedPiProviderId) => string | undefined;
   systemPrompt?: string;
+  taskToolExecutor?: TaskToolExecutor;
   requestTimeoutMs?: number;
 }
 
@@ -261,6 +265,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
   private readonly modelRefResolver: (() => PiModelRef | undefined) | undefined;
   private readonly apiKeyResolver: ((provider: SupportedPiProviderId) => string | undefined) | undefined;
   private readonly systemPrompt: string;
+  private readonly taskToolExecutor: TaskToolExecutor | undefined;
   private readonly requestTimeoutMs: number;
 
   constructor(options: PiRuntimeAdapterOptions = {}) {
@@ -268,6 +273,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     this.modelRefResolver = options.modelRefResolver;
     this.apiKeyResolver = options.apiKeyResolver;
     this.systemPrompt = options.systemPrompt ?? buildPersonalTaskSystemPrompt();
+    this.taskToolExecutor = options.taskToolExecutor;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 45_000;
   }
 
@@ -281,9 +287,23 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       this.resolveModelRef(input.modelRef)
     );
     const messageId = `${input.runId}_assistant`;
+    const userPrompt = buildTaskManagerUserPrompt(input);
+    const taskToolExecutor = this.taskToolExecutor;
+    const taskTools = taskToolExecutor
+      ? createPersonalTaskTools({
+          executor: (toolInput) =>
+            taskToolExecutor({
+              ...toolInput,
+              runId: input.runId,
+              ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+              ...(input.projectId ? { projectId: input.projectId } : {}),
+              ...(input.taskId ? { taskId: input.taskId } : {})
+            })
+        })
+      : [];
 
     if (runtimeSession.kind === "faux") {
-      runtimeSession.setPrompt(input.prompt);
+      runtimeSession.setPrompt(userPrompt);
     }
 
     const agent = new Agent({
@@ -291,13 +311,9 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         systemPrompt: this.systemPrompt,
         model: runtimeSession.model,
         thinkingLevel: input.thinkingLevel ?? "off",
-        tools: []
+        tools: taskTools
       },
       streamFn: runtimeSession.models.streamSimple.bind(runtimeSession.models),
-      beforeToolCall: async () => ({
-        block: true,
-        reason: "PersonalClaw Policy Engine has not approved this tool call yet."
-      }),
       toolExecution: "sequential"
     });
 
@@ -341,7 +357,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     void agent
       .prompt({
         role: "user",
-        content: input.prompt,
+        content: userPrompt,
         timestamp: Date.now()
       })
       .catch((error: unknown) => {
@@ -641,6 +657,8 @@ function toRuntimeEvents(
   }
 
   if (event.type === "message_end" && isAssistantMessage(event.message)) {
+    const thinking = readAssistantThinking(event.message);
+
     return [
       {
         type: "agent.completed",
@@ -649,6 +667,7 @@ function toRuntimeEvents(
         payload: {
           messageId,
           content: readAssistantText(event.message),
+          ...(thinking ? { thinking } : {}),
           stopReason: event.message.stopReason,
           usage: event.message.usage,
           runtime
@@ -689,34 +708,85 @@ function readAssistantText(message: AssistantMessage): string {
     .join("");
 }
 
+function readAssistantThinking(message: AssistantMessage): string {
+  return message.content
+    .filter((item) => item.type === "thinking")
+    .map((item) => item.thinking)
+    .join("\n\n");
+}
+
 function buildPersonalTaskSystemPrompt(): string {
   return [
-    "你是 PersonalClaw 的个人任务管理智能体核心。",
-    "你的职责是把用户输入整理成可理解、可审批、可恢复的个人任务草稿。",
-    "当用户描述任务时，你以 loop agent 的方式循环完成 intake、analysis、plan design 和 approval gate。",
-    "当前实现阶段不执行文件、Shell、网络或外部发送工具；任何工具调用都必须等待 Policy Engine 审批。",
-    "回答时先给任务目标，再给缺失信息、建议自动化等级和下一步。"
+    "你是 PersonalClaw 的后端任务管理智能体核心。",
+    "你的唯一产品职责是帮助用户管理 PersonalClaw Core 中持久化的任务体系：任务新建、任务列表、任务详情、任务元数据更新、任务启动状态和任务进度更新。",
+    "Core 的任务数据库是唯一事实来源。只要用户要创建、查询、更新、启动或推进任务，必须优先调用对应任务工具，而不是在聊天里编造状态。",
+    "当前可用工具只有：task_create、task_list、task_get、task_update、task_start、task_update_progress。",
+    "工具到 Core 的映射是：task_create -> task.create，task_list -> task.list，task_get -> task.get，task_update -> task.update，task_start -> task.setStatus，task_update_progress -> task.updateProgress。",
+    "不得使用或声称拥有文件、Shell、HTTP、浏览器、邮件、日历、代码执行、数据库直连等非任务系统工具。",
+    "Agent Utility 不直接访问 SQLite；所有持久化状态变化必须通过工具路由到 Core。只有工具结果 status 为 accepted 时，才可以说任务已经创建、更新、启动或推进。",
+    "如果 Context Pack 提供 activeProjectId，创建和列出任务时默认使用它；如果缺少 projectId 或 taskId，先问一个必要问题，不要猜测。",
+    "新建任务时提炼 title、goal、priority、source，并在用户提供足够信息时补充 steps；source.kind 默认使用 conversation。",
+    "查询任务列表时先调用 task_list；查看某个任务状态时先调用 task_get；更新进度时先调用 task_update_progress；开始任务时只改变状态，不宣称已经执行外部工作。",
+    "回复以任务结果为中心，简短说明任务 id、状态、进度、下一步或缺失信息。",
+    "使用 Markdown 排版：不同要点之间空一行；并列信息用无序列表；关键项加粗。不要输出一整段无换行的长文字。"
   ].join("\n");
 }
 
 function buildLocalTaskPlannerResponse(prompt: string): string {
-  const goal = prompt.trim().replace(/\s+/g, " ").slice(0, 180);
+  const goal = extractUserRequest(prompt).replace(/\s+/g, " ").slice(0, 180);
 
   return [
-    "我已经把这条输入接入 **pi-agent-core** 的 loop agent 任务草稿流程。",
+    "我已经通过 **pi-agent-core** 接入 **PersonalClaw Core 任务管理智能体**。",
     "",
-    `**任务目标**：${goal || "等待补充任务目标"}`,
+    `**用户请求**：${goal || "等待补充任务目标"}`,
     "",
     "| 项目 | 当前判断 |",
     "| --- | --- |",
-    "| 建议自动化等级 | L0 建议 |",
-    "| loop agent | intake -> analysis -> plan design -> approval gate |",
-    "| 当前阶段 | 只做分析和方案草稿，不执行工具 |",
-    "| 缺失信息 | 项目范围、完成标准、是否允许读取本地项目上下文 |",
+    "| 智能体职责 | 任务新建、任务列表、任务详情、状态和进度更新 |",
+    "| 当前工具 | task_create / task_list / task_get / task_update / task_start / task_update_progress |",
+    "| 状态来源 | Core 持久化任务库 |",
+    "| 注意 | 本地 faux 模型用于链路验证，不会主动发起真实工具调用 |",
     "",
-    "下一步：确认项目与边界后，由 Core 在后续 Phase 生成 TaskAnalysis、Plan 和审批记录。当前草稿不会改变 Task/Plan/Run 持久状态。"
+    "使用真实模型时，我会先调用对应任务工具，只有 Core 返回 accepted 后才确认任务状态变化。"
   ].join("\n");
 }
+
+function buildTaskManagerUserPrompt(input: AgentRunInput): string {
+  const contextLines = [
+    "Context Pack:",
+    `- sessionId: ${input.sessionId ?? "unavailable"}`,
+    `- runId: ${input.runId}`,
+    input.projectId
+      ? `- activeProjectId: ${input.projectId}`
+      : "- activeProjectId: unavailable; ask for the target project before creating or listing persisted tasks.",
+    input.taskId
+      ? `- activeTaskId: ${input.taskId}`
+      : "- activeTaskId: unavailable; ask for or search the task before updating a specific task.",
+    "",
+    "User request:",
+    input.prompt
+  ];
+
+  return contextLines.join("\n");
+}
+
+function extractUserRequest(prompt: string): string {
+  const marker = "\nUser request:\n";
+  const markerIndex = prompt.indexOf(marker);
+
+  if (markerIndex === -1) {
+    return prompt.trim();
+  }
+
+  return prompt.slice(markerIndex + marker.length).trim();
+}
+
+export {
+  PERSONAL_TASK_TOOL_NAMES,
+  createPersonalTaskTools,
+  type TaskToolExecutionInput,
+  type TaskToolExecutor
+} from "./task-tools";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;

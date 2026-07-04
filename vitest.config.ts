@@ -19,7 +19,6 @@ export default defineConfig({
       "@personal-claw/pi-runtime-adapter": resolve(root, "packages/pi-runtime-adapter/src/index.ts"),
       "@personal-claw/chat-ui-adapter": resolve(root, "packages/chat-ui-adapter/src/index.ts"),
       "@personal-claw/tool-sdk": resolve(root, "packages/tool-sdk/src/index.ts"),
-      "@personal-claw/policy-engine": resolve(root, "packages/policy-engine/src/index.ts"),
       "@personal-claw/scheduler": resolve(root, "packages/scheduler/src/index.ts")
     }
   }

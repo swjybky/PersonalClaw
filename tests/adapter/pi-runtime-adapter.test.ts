@@ -1,12 +1,106 @@
 import { describe, expect, it } from "vitest";
 import {
+  PERSONAL_TASK_TOOL_NAMES,
   PiAgentRuntimeAdapter,
+  createPersonalTaskTools,
   createPiModelRefFromEnv,
   providerApiKeyEnvVar,
   type AgentRuntimeEvent
 } from "@personal-claw/pi-runtime-adapter";
 
 describe("pi runtime adapter", () => {
+  const noopTaskExecutor = async () => ({
+    content: [{ type: "text" as const, text: "noop" }],
+    details: {
+      toolName: "task_list" as const,
+      commandType: "task.list" as const,
+      routedThrough: "core" as const,
+      status: "accepted" as const,
+      requestId: "cmd_noop",
+      payload: {}
+    }
+  });
+
+  it("exposes only PersonalClaw task-system tools to the agent", () => {
+    const tools = createPersonalTaskTools({ executor: noopTaskExecutor });
+
+    expect(tools.map((tool) => tool.name)).toEqual([...PERSONAL_TASK_TOOL_NAMES]);
+    expect(tools.map((tool) => tool.name)).not.toContain("read_file");
+    expect(tools.map((tool) => tool.name)).not.toContain("bash");
+    expect(tools.map((tool) => tool.name)).not.toContain("http_request");
+    expect(tools.map((tool) => tool.name)).not.toContain("browser_open");
+
+    const startTool = tools.find((tool) => tool.name === "task_start");
+    expect(startTool?.description).toContain("Core");
+  });
+
+  it("throws instead of returning a fake tool result when Core executor is missing", async () => {
+    const tool = createPersonalTaskTools().find((candidate) => candidate.name === "task_create");
+
+    if (!tool) {
+      throw new Error("task_create tool missing");
+    }
+
+    await expect(tool.execute("tool_call_test", {})).rejects.toThrow("Core task command executor was not injected");
+  });
+
+  it("routes task tools through the injected Core executor", async () => {
+    const tool = createPersonalTaskTools({
+      executor: async (input) => {
+        expect(input.toolName).toBe("task_create");
+        expect(input.commandType).toBe("task.create");
+        expect(input.args).toEqual({
+          projectId: "project_1",
+          title: "测试任务",
+          goal: "验证 Core 工具路由",
+          source: {
+            kind: "conversation"
+          }
+        });
+
+        return {
+          content: [{ type: "text", text: "Core accepted task.create." }],
+          details: {
+            toolName: input.toolName,
+            commandType: input.commandType,
+            routedThrough: "core",
+            status: "accepted",
+            requestId: "cmd_tool_1",
+            payload: {
+              id: "task_1",
+              status: "draft"
+            }
+          }
+        };
+      }
+    }).find((candidate) => candidate.name === "task_create");
+
+    if (!tool) {
+      throw new Error("task_create tool missing");
+    }
+
+    const result = await tool.execute("tool_call_test", {
+      projectId: "project_1",
+      title: "测试任务",
+      goal: "验证 Core 工具路由",
+      source: {
+        kind: "conversation"
+      }
+    });
+
+    expect(result.details).toEqual({
+      toolName: "task_create",
+      commandType: "task.create",
+      routedThrough: "core",
+      status: "accepted",
+      requestId: "cmd_tool_1",
+      payload: {
+        id: "task_1",
+        status: "draft"
+      }
+    });
+  });
+
   it("streams a local PersonalClaw task response through pi-agent-core", async () => {
     const runtime = new PiAgentRuntimeAdapter();
     const events: AgentRuntimeEvent[] = [];
@@ -21,9 +115,10 @@ describe("pi runtime adapter", () => {
 
     const completed = events.find((event) => event.type === "agent.completed");
 
-    expect(completed?.payload.content).toContain("pi-agent-core");
     expect(completed?.payload.content).toContain("**pi-agent-core**");
     expect(completed?.payload.content).toContain("| 项目 | 当前判断 |");
+    expect(completed?.payload.content).toContain("任务新建、任务列表、任务详情、状态和进度更新");
+    expect(completed?.payload.content).toContain("Core 持久化任务库");
     expect(completed?.payload.runtime.mode).toBe("local-faux");
   });
 
@@ -125,4 +220,3 @@ describe("pi runtime adapter", () => {
     }
   });
 });
-

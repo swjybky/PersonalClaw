@@ -60,6 +60,11 @@ interface RendererSmokeSummary {
     hasStrong: boolean;
     hasTable: boolean;
   };
+  taskCore: {
+    status: string;
+    projectCount: number;
+    codeAgentCount: number;
+  };
 }
 
 function broadcastEvent(event: SystemEventEnvelope): void {
@@ -127,6 +132,25 @@ function registerIpcHandlers(): void {
 
     const command = parsed.data;
 
+    const forwardToUtility = async (
+      worker: "core" | "agent",
+      failureCode: string
+    ): Promise<CommandResult> => {
+      try {
+        return await supervisor.requestCommand(worker, command);
+      } catch (error: unknown) {
+        return {
+          status: "rejected",
+          requestId: command.id,
+          error: {
+            code: failureCode,
+            message: error instanceof Error ? error.message : "Utility command failed.",
+            details: serializeError(error)
+          }
+        };
+      }
+    };
+
     if (command.type === "system.health") {
       const health = SystemHealthPayloadSchema.parse(await supervisor.collectHealth());
       const event = createEnvelope("system.health", health, {
@@ -145,36 +169,20 @@ function registerIpcHandlers(): void {
       };
     }
 
+    if (
+      command.type.startsWith("project.") ||
+      command.type.startsWith("codeAgent.") ||
+      (command.type.startsWith("task.") && command.type !== "task.draftFromDescription")
+    ) {
+      return forwardToUtility("core", "ipc.core_command_failed");
+    }
+
     if (command.type === "session.prompt" || command.type === "task.draftFromDescription") {
-      try {
-        return await supervisor.requestCommand("agent", command);
-      } catch (error: unknown) {
-        return {
-          status: "rejected",
-          requestId: command.id,
-          error: {
-            code: "ipc.utility_command_failed",
-            message: error instanceof Error ? error.message : "Utility command failed.",
-            details: serializeError(error)
-          }
-        };
-      }
+      return forwardToUtility("agent", "ipc.utility_command_failed");
     }
 
     if (command.type === "modelConfig.test") {
-      try {
-        return await supervisor.requestCommand("agent", command);
-      } catch (error: unknown) {
-        return {
-          status: "rejected",
-          requestId: command.id,
-          error: {
-            code: "modelConfig.test_failed",
-            message: error instanceof Error ? error.message : "Model config test failed.",
-            details: serializeError(error)
-          }
-        };
-      }
+      return forwardToUtility("agent", "modelConfig.test_failed");
     }
 
     if (command.type === "modelConfig.list") {
@@ -256,6 +264,7 @@ function isRendererSmokeSummary(value: unknown): value is RendererSmokeSummary {
     agent?: unknown;
     piWebComponents?: unknown;
     conversationRender?: unknown;
+    taskCore?: unknown;
   };
 
   if (typeof candidate.status !== "string" || !Array.isArray(candidate.workers)) {
@@ -275,6 +284,10 @@ function isRendererSmokeSummary(value: unknown): value is RendererSmokeSummary {
   }
 
   if (typeof candidate.conversationRender !== "object" || candidate.conversationRender === null) {
+    return false;
+  }
+
+  if (typeof candidate.taskCore !== "object" || candidate.taskCore === null) {
     return false;
   }
 
@@ -301,6 +314,11 @@ function isRendererSmokeSummary(value: unknown): value is RendererSmokeSummary {
     hasStrong?: unknown;
     hasTable?: unknown;
   };
+  const taskCore = candidate.taskCore as {
+    status?: unknown;
+    projectCount?: unknown;
+    codeAgentCount?: unknown;
+  };
 
   return (
     hasNullableString(navigation.beforeTitle) &&
@@ -315,7 +333,10 @@ function isRendererSmokeSummary(value: unknown): value is RendererSmokeSummary {
     typeof conversationRender.status === "string" &&
     typeof conversationRender.hasAssistantText === "boolean" &&
     typeof conversationRender.hasStrong === "boolean" &&
-    typeof conversationRender.hasTable === "boolean"
+    typeof conversationRender.hasTable === "boolean" &&
+    typeof taskCore.status === "string" &&
+    typeof taskCore.projectCount === "number" &&
+    typeof taskCore.codeAgentCount === "number"
   );
 }
 
@@ -416,6 +437,18 @@ async function runRendererSmoke(): Promise<void> {
         }
 
         const health = await window.personalClaw.system.health();
+        const taskCore = await Promise.all([
+          window.personalClaw.project.list(),
+          window.personalClaw.codeAgent.list()
+        ]).then(([projectList, codeAgentList]) => ({
+          status: "ok",
+          projectCount: projectList.projects.length,
+          codeAgentCount: codeAgentList.profiles.length
+        })).catch((error) => ({
+          status: error instanceof Error ? error.message : "task_core_failed",
+          projectCount: 0,
+          codeAgentCount: 0
+        }));
         const smokeSessionId = "renderer-smoke-session";
         const agent = await new Promise((resolve) => {
           let settled = false;
@@ -569,7 +602,10 @@ async function runRendererSmoke(): Promise<void> {
             conversationRender.status === "ok" &&
             conversationRender.hasAssistantText &&
             conversationRender.hasStrong &&
-            conversationRender.hasTable
+            conversationRender.hasTable &&
+            taskCore.status === "ok" &&
+            taskCore.projectCount > 0 &&
+            taskCore.codeAgentCount > 0
               ? health.status
               : "navigation_agent_or_pi_web_failed",
           workers: health.workers.map((worker) => ({
@@ -583,7 +619,8 @@ async function runRendererSmoke(): Promise<void> {
           },
           agent,
           piWebComponents,
-          conversationRender
+          conversationRender,
+          taskCore
         };
       })()
     `),

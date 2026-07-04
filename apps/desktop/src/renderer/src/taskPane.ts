@@ -8,7 +8,7 @@ interface TaskPaneCollapseState {
 }
 
 export function useTaskPaneCollapse(): TaskPaneCollapseState {
-  const isTaskPaneCollapsed = ref(true);
+  const isTaskPaneCollapsed = ref(false);
   const taskPaneToggleLabel = computed(() =>
     isTaskPaneCollapsed.value ? "展开任务信息栏" : "收回任务信息栏"
   );

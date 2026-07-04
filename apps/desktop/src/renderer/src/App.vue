@@ -4,13 +4,19 @@ import { NConfigProvider, NDropdown, NTag } from "naive-ui";
 import type { DropdownOption } from "naive-ui";
 import type { UiMessage, UiToolCall } from "@personal-claw/chat-ui-adapter";
 import type {
-  PiRuntimeRef,
+  CodeAgentProfile,
+  ProjectSummary,
   SystemEventEnvelope,
   TaskDraftPreview,
+  TaskPriority,
+  TaskStatusDto,
+  TaskStatusView,
+  TaskSummary,
   ThinkingLevel
 } from "@personal-claw/contracts";
 import AgentConversation from "./components/AgentConversation.vue";
 import ModelConfig from "./components/ModelConfig.vue";
+import ProjectConfig from "./components/ProjectConfig.vue";
 import {
   buildConversationHistoryRecord,
   createConversationSessionId,
@@ -31,15 +37,11 @@ import { useModelConfigStore } from "./stores/modelConfig";
 import { useHistorySectionCollapse, useSidebarCollapse } from "./sidebarPane";
 import { useTaskPaneCollapse } from "./taskPane";
 import {
-  buildTaskProgressItems,
-  summarizeTaskDraft,
-  taskProgressPercent as calculateTaskProgressPercent
-} from "./taskDraftPreview";
-import {
   defaultThinkingLevelForModel,
   resolveThinkingLevelForModel,
   supportsThinkingLevel
 } from "./modelCapabilities";
+import { pickTaskId, summarizeTaskBoard, taskStatusLabel } from "./taskBoard";
 
 interface HistoryItem {
   id: string;
@@ -54,10 +56,15 @@ interface DetailRow {
   value: string;
 }
 
+interface SettingsSection {
+  id: "system-prompt";
+  label: string;
+  detail: string;
+}
+
 interface ActiveAgentRun {
   sessionId: string;
   runId: string;
-  startedAtMs: number;
 }
 
 const system = useSystemStore();
@@ -68,7 +75,7 @@ const composerDraft = ref("");
 const thinkingLevel = ref<ThinkingLevel>("off");
 const { isSidebarCollapsed, sidebarToggleLabel, toggleSidebar } = useSidebarCollapse();
 const { isHistoryCollapsed, historyToggleLabel, toggleHistory } = useHistorySectionCollapse();
-const { isTaskPaneCollapsed, taskPaneToggleLabel, toggleTaskPane } = useTaskPaneCollapse();
+const { isTaskPaneCollapsed, taskPaneToggleLabel, collapseTaskPane, toggleTaskPane } = useTaskPaneCollapse();
 const assistantMessageByRun = new Map<string, string>();
 const finishedAgentRunKeys = new Set<string>();
 const handledEventIds = new Set<string>();
@@ -79,19 +86,47 @@ const activeAgentRuns = ref<ActiveAgentRun[]>([]);
 const toolCalls = ref<UiToolCall[]>([]);
 const latestTaskDraft = ref<TaskDraftPreview | null>(null);
 const latestAgentDiagnostic = ref<string | null>(null);
-const latestThinkingPreview = ref("");
-const lastRunDurationMs = ref<number | null>(null);
-const elapsedNowMs = ref(Date.now());
-let elapsedTimerId: number | undefined;
 
 const historyRecords = ref<ConversationHistoryRecord[]>([]);
+const openHistoryActionSessionId = ref<string | null>(null);
+const projects = ref<ProjectSummary[]>([]);
+const selectedProjectId = ref<string | null>(null);
+const taskList = ref<TaskSummary[]>([]);
+const selectedTaskId = ref<string | null>(null);
+const selectedTaskView = ref<TaskStatusView | null>(null);
+const codeAgents = ref<CodeAgentProfile[]>([]);
+const taskCoreError = ref<string | null>(null);
+const isTaskCoreLoading = ref(false);
+const isCreateTaskDialogOpen = ref(false);
+const taskTab = ref<"all" | "todo" | "done" | "blocked">("all");
+const newTaskTitle = ref("");
+const newTaskGoal = ref("");
+const newTaskProjectId = ref("");
+const newTaskPriority = ref<TaskPriority>("normal");
+const newTaskCodeAgentId = ref("");
+const selectedStatusDraft = ref<TaskStatusDto>("draft");
+const selectedProgressDraft = ref(0);
+const selectedCodeAgentDraft = ref("");
+const activeSettingsSectionId = ref<SettingsSection["id"]>("system-prompt");
+const systemPromptDraft = ref(
+  "你是 PersonalClaw，一个本地优先、可审批、可恢复、可审计的个人任务智能体。你需要把用户目标拆解为可验证的任务、方案和执行步骤，并在涉及工具、文件、密钥或外部系统时遵守项目权限与人工审批边界。"
+);
 
-const projectRows: readonly DetailRow[] = [
-  { id: "project-name", label: "项目名称", value: "PersonalClaw" },
-  { id: "project-root", label: "个人项目目录", value: "/home/swj/project/ai/PersonalClaw/repo" },
-  { id: "artifact-root", label: "产物目录", value: "应用数据目录 / artifacts" },
-  { id: "scope", label: "权限范围", value: "项目目录内受控读写" }
+const taskStatusOptions: readonly TaskStatusDto[] = [
+  "draft",
+  "analyzing",
+  "design_ready",
+  "queued",
+  "running",
+  "paused",
+  "blocked",
+  "verifying",
+  "succeeded",
+  "failed",
+  "cancelled"
 ];
+
+const taskPriorityOptions: readonly TaskPriority[] = ["low", "normal", "high", "urgent"];
 
 const sourceRows: readonly DetailRow[] = [
   { id: "manual", label: "手动输入", value: "启用" },
@@ -107,13 +142,25 @@ const codeAgentRows: readonly DetailRow[] = [
   { id: "codex", label: "Codex", value: "可配置 CLI Agent" }
 ];
 
+const settingsSections: readonly SettingsSection[] = [
+  {
+    id: "system-prompt",
+    label: "系统提示词",
+    detail: "构建这个智能体的任务提示词"
+  }
+];
+
 const navigationShortcutByKey: Partial<Record<NavigationKey, string>> = {
   conversation: "Ctrl+N"
 };
 
 const activeNavigation = computed(() => getNavigationItem(activeNavigationKey.value));
 const isFullBleedView = computed(
-  () => activeNavigationKey.value === "conversation" || activeNavigationKey.value === "model-config"
+  () =>
+    activeNavigationKey.value === "conversation" ||
+    activeNavigationKey.value === "model-config" ||
+    activeNavigationKey.value === "project-config" ||
+    activeNavigationKey.value === "settings"
 );
 const modelLabel = computed(() => modelConfig.defaultSummary?.label ?? "本地 Faux");
 const modeLabel = computed(() => (modelConfig.hasRealProvider ? "个人任务助手" : "本地模式"));
@@ -124,22 +171,6 @@ const effectiveThinkingLevel = computed(() =>
 const isConversationStreaming = computed(() =>
   activeAgentRuns.value.some((run) => run.sessionId === activeSessionId.value)
 );
-const activeConversationRun = computed(() =>
-  activeAgentRuns.value.find((run) => run.sessionId === activeSessionId.value)
-);
-const workStatusLabel = computed(() => {
-  const activeRun = activeConversationRun.value;
-
-  if (activeRun) {
-    return `Working for ${formatRunDuration(elapsedNowMs.value - activeRun.startedAtMs)}`;
-  }
-
-  if (lastRunDurationMs.value !== null) {
-    return `Worked for ${formatRunDuration(lastRunDurationMs.value)}`;
-  }
-
-  return "";
-});
 const historyItems = computed<HistoryItem[]>(() =>
   historyRecords.value.map((record) => ({
     id: record.id,
@@ -149,29 +180,275 @@ const historyItems = computed<HistoryItem[]>(() =>
   }))
 );
 const historyActionOptions: DropdownOption[] = [{ label: "删除", key: "delete" }];
-const workerRows = computed(() => system.health?.workers ?? []);
-const overallStatus = computed(() => system.health?.status ?? "starting");
-const isTaskDraftRunning = computed(() => activeConversationRun.value !== undefined && latestTaskDraft.value === null);
-const taskProgressItems = computed(() =>
-  buildTaskProgressItems(latestTaskDraft.value, isTaskDraftRunning.value)
+const selectedTask = computed(() =>
+  taskList.value.find((task) => task.id === selectedTaskId.value) ?? null
 );
-const latestTaskDraftSummary = computed(() => summarizeTaskDraft(latestTaskDraft.value));
-const taskProgressPercent = computed(() => calculateTaskProgressPercent(taskProgressItems.value));
+const taskBoardCounts = computed(() => summarizeTaskBoard(taskList.value));
+const projectNameById = computed(() =>
+  new Map(projects.value.map((project) => [project.id, project.name] as const))
+);
+const filteredTaskList = computed(() => {
+  switch (taskTab.value) {
+    case "todo":
+      return taskList.value.filter((task) =>
+        ["draft", "analyzing", "design_ready", "queued", "running", "paused", "verifying"].includes(task.status)
+      );
+    case "done":
+      return taskList.value.filter((task) => task.status === "succeeded");
+    case "blocked":
+      return taskList.value.filter((task) => task.status === "blocked" || task.status === "failed");
+    case "all":
+      return taskList.value;
+  }
+});
+const selectedTaskCodeAgent = computed(() =>
+  selectedTask.value?.codeAgentId
+    ? codeAgents.value.find((profile) => profile.id === selectedTask.value?.codeAgentId) ?? null
+    : null
+);
+const codeAgentOptions = computed(() =>
+  codeAgents.value.filter((profile) => profile.enabled && profile.archivedAt === null)
+);
 
-function statusType(status: string): "success" | "warning" | "error" | "default" {
-  if (status === "ok" || status === "ready") {
+function taskTagType(status: TaskStatusDto): "success" | "warning" | "error" | "default" | "info" {
+  if (status === "succeeded") {
     return "success";
   }
 
-  if (status === "starting") {
-    return "warning";
-  }
-
-  if (status === "stopped" || status === "degraded") {
+  if (status === "blocked" || status === "failed" || status === "cancelled") {
     return "error";
   }
 
+  if (status === "running" || status === "verifying" || status === "queued") {
+    return "warning";
+  }
+
+  if (status === "design_ready") {
+    return "info";
+  }
+
   return "default";
+}
+
+function formatTaskCoreError(error: unknown): string {
+  return error instanceof Error ? error.message : "任务系统操作失败。";
+}
+
+function syncSelectedTaskDrafts(task: TaskSummary | null): void {
+  if (!task) {
+    selectedStatusDraft.value = "draft";
+    selectedProgressDraft.value = 0;
+    selectedCodeAgentDraft.value = "";
+    return;
+  }
+
+  selectedStatusDraft.value = task.status;
+  selectedProgressDraft.value = task.progressPercent;
+  selectedCodeAgentDraft.value = task.codeAgentId ?? "";
+}
+
+async function refreshProjects(): Promise<void> {
+  const payload = await window.personalClaw.project.list();
+  projects.value = payload.projects;
+
+  if (!selectedProjectId.value || !payload.projects.some((project) => project.id === selectedProjectId.value)) {
+    selectedProjectId.value = payload.activeProjectId;
+  }
+
+  if (!newTaskProjectId.value || !payload.projects.some((project) => project.id === newTaskProjectId.value)) {
+    newTaskProjectId.value = selectedProjectId.value ?? payload.activeProjectId ?? "";
+  }
+}
+
+async function refreshCodeAgents(): Promise<void> {
+  const payload = await window.personalClaw.codeAgent.list();
+  codeAgents.value = payload.profiles;
+}
+
+async function refreshSelectedTask(): Promise<void> {
+  const taskId = selectedTaskId.value;
+
+  if (!taskId) {
+    selectedTaskView.value = null;
+    syncSelectedTaskDrafts(null);
+    return;
+  }
+
+  const view = await window.personalClaw.task.get({ id: taskId });
+  selectedTaskView.value = view;
+  syncSelectedTaskDrafts(view.task);
+}
+
+async function refreshTasks(): Promise<void> {
+  if (!projects.value.length) {
+    taskList.value = [];
+    selectedTaskId.value = null;
+    selectedTaskView.value = null;
+    return;
+  }
+
+  const taskPayloads = await Promise.all(
+    projects.value.map((project) => window.personalClaw.task.list({ projectId: project.id }))
+  );
+  const tasks = taskPayloads
+    .flatMap((payload) => payload.tasks)
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+
+  taskList.value = tasks;
+  selectedTaskId.value = pickTaskId(tasks, selectedTaskId.value);
+  await refreshSelectedTask();
+}
+
+async function initializeTaskCore(): Promise<void> {
+  isTaskCoreLoading.value = true;
+  taskCoreError.value = null;
+
+  try {
+    await Promise.all([refreshProjects(), refreshCodeAgents()]);
+    await refreshTasks();
+  } catch (error: unknown) {
+    taskCoreError.value = formatTaskCoreError(error);
+  } finally {
+    isTaskCoreLoading.value = false;
+  }
+}
+
+async function handleProjectConfigChanged(): Promise<void> {
+  taskCoreError.value = null;
+
+  try {
+    await refreshProjects();
+    await refreshTasks();
+  } catch (error: unknown) {
+    taskCoreError.value = formatTaskCoreError(error);
+  }
+}
+
+function openCreateTaskDialog(): void {
+  newTaskProjectId.value = selectedProjectId.value ?? projects.value[0]?.id ?? "";
+  isCreateTaskDialogOpen.value = true;
+}
+
+function closeCreateTaskDialog(): void {
+  isCreateTaskDialogOpen.value = false;
+}
+
+async function createTaskFromPane(): Promise<void> {
+  const projectId = newTaskProjectId.value;
+  const title = newTaskTitle.value.trim();
+  const goal = newTaskGoal.value.trim();
+
+  if (!projectId || !title || !goal) {
+    return;
+  }
+
+  taskCoreError.value = null;
+
+  try {
+    const task = await window.personalClaw.task.create({
+      projectId,
+      title,
+      goal,
+      source: {
+        kind: "manual",
+        label: "测试新建任务"
+      },
+      priority: newTaskPriority.value,
+      codeAgentId: newTaskCodeAgentId.value || null
+    });
+
+    newTaskTitle.value = "";
+    newTaskGoal.value = "";
+    closeCreateTaskDialog();
+    selectedTaskId.value = task.id;
+    await refreshTasks();
+
+    if (isTaskPaneCollapsed.value) {
+      toggleTaskPane();
+    }
+  } catch (error: unknown) {
+    taskCoreError.value = formatTaskCoreError(error);
+  }
+}
+
+async function deleteSelectedTask(): Promise<void> {
+  const task = selectedTask.value;
+
+  if (!task) {
+    return;
+  }
+
+  taskCoreError.value = null;
+
+  try {
+    await window.personalClaw.task.delete({ id: task.id });
+    await refreshTasks();
+  } catch (error: unknown) {
+    taskCoreError.value = formatTaskCoreError(error);
+  }
+}
+
+async function updateSelectedTaskStatus(): Promise<void> {
+  const task = selectedTask.value;
+
+  if (!task || task.status === selectedStatusDraft.value) {
+    return;
+  }
+
+  taskCoreError.value = null;
+
+  try {
+    await window.personalClaw.task.setStatus({
+      id: task.id,
+      status: selectedStatusDraft.value
+    });
+    await refreshTasks();
+  } catch (error: unknown) {
+    taskCoreError.value = formatTaskCoreError(error);
+    syncSelectedTaskDrafts(task);
+  }
+}
+
+async function updateSelectedTaskProgress(): Promise<void> {
+  const task = selectedTask.value;
+
+  if (!task) {
+    return;
+  }
+
+  taskCoreError.value = null;
+
+  try {
+    await window.personalClaw.task.updateProgress({
+      id: task.id,
+      progressPercent: selectedProgressDraft.value
+    });
+    await refreshTasks();
+  } catch (error: unknown) {
+    taskCoreError.value = formatTaskCoreError(error);
+    syncSelectedTaskDrafts(task);
+  }
+}
+
+async function assignSelectedTaskCodeAgent(): Promise<void> {
+  const task = selectedTask.value;
+
+  if (!task) {
+    return;
+  }
+
+  taskCoreError.value = null;
+
+  try {
+    await window.personalClaw.task.assignCodeAgent({
+      id: task.id,
+      codeAgentId: selectedCodeAgentDraft.value || null
+    });
+    await refreshTasks();
+  } catch (error: unknown) {
+    taskCoreError.value = formatTaskCoreError(error);
+    syncSelectedTaskDrafts(task);
+  }
 }
 
 function selectNavigation(key: NavigationKey): void {
@@ -187,20 +464,16 @@ function openModelConfig(): void {
   activeNavigationKey.value = "model-config";
 }
 
-function updateThinkingLevel(value: ThinkingLevel): void {
-  thinkingLevel.value = activeModelSupportsThinking.value ? value : "off";
+function openSettings(): void {
+  activeNavigationKey.value = "settings";
 }
 
-function formatRunDuration(durationMs: number): string {
-  const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
+function returnHome(): void {
+  activeNavigationKey.value = "conversation";
+}
 
-  if (minutes > 0) {
-    return `${minutes}m ${seconds}s`;
-  }
-
-  return `${seconds}s`;
+function updateThinkingLevel(value: ThinkingLevel): void {
+  thinkingLevel.value = activeModelSupportsThinking.value ? value : "off";
 }
 
 function removeHistorySession(sessionId: string): void {
@@ -258,7 +531,7 @@ function stringifyDiagnosticDetails(details: unknown): string | undefined {
 }
 
 function stringifyToolCallSummary(args: unknown): string {
-  const prefix = "已拦截，等待 Policy Engine 审批";
+  const prefix = "工具调用请求";
 
   if (args === undefined) {
     return prefix;
@@ -308,14 +581,42 @@ function deleteHistorySession(sessionId: string): void {
   toolCalls.value = [];
   latestTaskDraft.value = null;
   latestAgentDiagnostic.value = null;
-  latestThinkingPreview.value = "";
-  lastRunDurationMs.value = null;
   skipNextHistoryPersist = true;
   messages.value = createDefaultConversationMessages();
   activeNavigationKey.value = "conversation";
 }
 
+function toggleHistoryActionMenu(sessionId: string, event: MouseEvent): void {
+  event.stopPropagation();
+  openHistoryActionSessionId.value = openHistoryActionSessionId.value === sessionId ? null : sessionId;
+}
+
+function closeHistoryActionMenu(): void {
+  openHistoryActionSessionId.value = null;
+}
+
+function handleDocumentClick(event: MouseEvent): void {
+  const target = event.target;
+
+  if (!(target instanceof Node)) {
+    return;
+  }
+
+  if (!(target instanceof Element)) {
+    closeHistoryActionMenu();
+    return;
+  }
+
+  if (target.closest(".history-action") || target.closest(".n-dropdown-menu")) {
+    return;
+  }
+
+  closeHistoryActionMenu();
+}
+
 function handleHistoryAction(sessionId: string, actionKey: string | number): void {
+  closeHistoryActionMenu();
+
   if (actionKey === "delete") {
     deleteHistorySession(sessionId);
     return;
@@ -337,8 +638,6 @@ function startNewConversation(): void {
   toolCalls.value = [];
   latestTaskDraft.value = null;
   latestAgentDiagnostic.value = null;
-  latestThinkingPreview.value = "";
-  lastRunDurationMs.value = null;
   skipNextHistoryPersist = true;
   messages.value = createDefaultConversationMessages();
   activeNavigationKey.value = "conversation";
@@ -351,22 +650,7 @@ function createDefaultConversationMessages(): UiMessage[] {
 function initializeConversationHistory(): void {
   const loadedRecords = loadConversationHistory().filter((record) => hasUserMessage(record.messages));
 
-  if (loadedRecords.length > 0) {
-    const [latestRecord] = loadedRecords;
-
-    if (!latestRecord) {
-      throw new Error("历史记录加载失败。");
-    }
-
-    historyRecords.value = loadedRecords;
-    saveConversationHistory(historyRecords.value);
-    activeSessionId.value = latestRecord.id;
-    skipNextHistoryPersist = true;
-    messages.value = latestRecord.messages.map((message) => ({ ...message }));
-    return;
-  }
-
-  historyRecords.value = [];
+  historyRecords.value = loadedRecords;
   saveConversationHistory(historyRecords.value);
 }
 
@@ -385,6 +669,8 @@ function persistActiveConversation(): void {
 }
 
 function selectHistory(id: string): void {
+  closeHistoryActionMenu();
+
   const record = historyRecords.value.find((item) => item.id === id);
 
   if (!record) {
@@ -398,8 +684,6 @@ function selectHistory(id: string): void {
   toolCalls.value = [];
   latestTaskDraft.value = null;
   latestAgentDiagnostic.value = null;
-  latestThinkingPreview.value = "";
-  lastRunDurationMs.value = null;
   skipNextHistoryPersist = true;
   messages.value = record.messages.map((message) => ({ ...message }));
 }
@@ -419,23 +703,16 @@ function markRunStreaming(sessionId: string, runId: string): void {
     return;
   }
 
-  activeAgentRuns.value = [...activeAgentRuns.value, { sessionId, runId, startedAtMs: Date.now() }];
+  activeAgentRuns.value = [...activeAgentRuns.value, { sessionId, runId }];
 }
 
 function finishRun(sessionId: string, runId: string): void {
   const key = agentRunKey(sessionId, runId);
   const timeoutId = agentRunTimeouts.get(key);
-  const activeRun = activeAgentRuns.value.find(
-    (run) => run.sessionId === sessionId && run.runId === runId
-  );
 
   if (timeoutId !== undefined) {
     window.clearTimeout(timeoutId);
     agentRunTimeouts.delete(key);
-  }
-
-  if (activeRun && sessionId === activeSessionId.value) {
-    lastRunDurationMs.value = Math.max(0, Date.now() - activeRun.startedAtMs);
   }
 
   finishedAgentRunKeys.add(key);
@@ -508,6 +785,18 @@ function updateAssistantMessage(messageId: string, nextContent: string): void {
   );
 }
 
+function updateAssistantThinking(messageId: string, nextThinking: string): void {
+  messages.value = messages.value.map((message) =>
+    message.id === messageId
+      ? {
+          ...message,
+          thinking: nextThinking,
+          createdAt: new Date().toISOString()
+        }
+      : message
+  );
+}
+
 function appendAssistantDelta(messageId: string, delta: string): void {
   if (!delta) {
     return;
@@ -518,6 +807,22 @@ function appendAssistantDelta(messageId: string, delta: string): void {
       ? {
           ...message,
           content: `${message.content}${delta}`,
+          createdAt: new Date().toISOString()
+        }
+      : message
+  );
+}
+
+function appendThinkingDelta(messageId: string, delta: string): void {
+  if (!delta) {
+    return;
+  }
+
+  messages.value = messages.value.map((message) =>
+    message.id === messageId
+      ? {
+          ...message,
+          thinking: `${message.thinking ?? ""}${delta}`,
           createdAt: new Date().toISOString()
         }
       : message
@@ -535,6 +840,27 @@ function handleAgentEvent(event: SystemEventEnvelope): void {
     if (oldestEventId) {
       handledEventIds.delete(oldestEventId);
     }
+  }
+
+  if (event.type === "project.created") {
+    void initializeTaskCore();
+    return;
+  }
+
+  if (event.type === "codeAgent.updated") {
+    void refreshCodeAgents();
+    return;
+  }
+
+  if (
+    event.type === "task.created" ||
+    event.type === "task.updated" ||
+    event.type === "task.status_changed" ||
+    event.type === "task.progress_changed" ||
+    event.type === "task.archived"
+  ) {
+    void refreshTasks();
+    return;
   }
 
   if (event.type === "agent.message_delta") {
@@ -558,7 +884,10 @@ function handleAgentEvent(event: SystemEventEnvelope): void {
       return;
     }
 
-    latestThinkingPreview.value = `${latestThinkingPreview.value}${event.payload.delta}`.slice(-2000);
+    latestAgentDiagnostic.value = null;
+
+    const messageId = ensureAssistantMessage(event.payload.runId);
+    appendThinkingDelta(messageId, event.payload.delta);
     return;
   }
 
@@ -571,6 +900,9 @@ function handleAgentEvent(event: SystemEventEnvelope): void {
 
     latestAgentDiagnostic.value = null;
     const messageId = ensureAssistantMessage(event.payload.runId);
+    if (event.payload.thinking?.trim()) {
+      updateAssistantThinking(messageId, event.payload.thinking);
+    }
     if (event.payload.content.trim()) {
       updateAssistantMessage(messageId, event.payload.content);
     }
@@ -642,14 +974,14 @@ async function sendConversationMessage(content: string): Promise<void> {
   composerDraft.value = "";
   latestAgentDiagnostic.value = null;
   latestTaskDraft.value = null;
-  latestThinkingPreview.value = "";
-  lastRunDurationMs.value = null;
 
   try {
     const accepted = await window.personalClaw.session.prompt({
       sessionId: activeSessionId.value,
       message: content,
-      thinkingLevel: effectiveThinkingLevel.value
+      thinkingLevel: effectiveThinkingLevel.value,
+      ...(selectedProjectId.value ? { projectId: selectedProjectId.value } : {}),
+      ...(selectedTaskId.value ? { taskId: selectedTaskId.value } : {})
     });
     markRunStreaming(accepted.sessionId, accepted.runId);
     watchRunProgress(accepted.sessionId, accepted.runId);
@@ -670,13 +1002,12 @@ async function sendConversationMessage(content: string): Promise<void> {
 }
 
 onMounted(() => {
-  elapsedTimerId = window.setInterval(() => {
-    elapsedNowMs.value = Date.now();
-  }, 1000);
+  document.addEventListener("click", handleDocumentClick);
   initializeConversationHistory();
   system.subscribe(handleAgentEvent);
   void system.refreshHealth();
   void modelConfig.refresh();
+  void initializeTaskCore();
 });
 
 watch(messages, () => {
@@ -703,10 +1034,22 @@ watch(
   { immediate: true }
 );
 
-onBeforeUnmount(() => {
-  if (elapsedTimerId !== undefined) {
-    window.clearInterval(elapsedTimerId);
+watch(selectedProjectId, (projectId) => {
+  if (!newTaskProjectId.value && projectId) {
+    newTaskProjectId.value = projectId;
   }
+});
+
+watch(selectedTaskId, (taskId, previousTaskId) => {
+  if (taskId && taskId !== previousTaskId) {
+    void refreshSelectedTask().catch((error: unknown) => {
+      taskCoreError.value = formatTaskCoreError(error);
+    });
+  }
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener("click", handleDocumentClick);
   for (const timeoutId of agentRunTimeouts.values()) {
     window.clearTimeout(timeoutId);
   }
@@ -721,7 +1064,8 @@ onBeforeUnmount(() => {
       class="desktop-shell"
       :class="{
         'is-sidebar-collapsed': isSidebarCollapsed,
-        'is-task-pane-collapsed': isTaskPaneCollapsed
+        'is-task-pane-collapsed': isTaskPaneCollapsed,
+        'is-settings-active': activeNavigationKey === 'settings'
       }"
     >
       <aside class="left-rail" :class="{ 'is-collapsed': isSidebarCollapsed }" aria-label="工作区导航">
@@ -785,18 +1129,31 @@ onBeforeUnmount(() => {
 
         <section class="history-section" :class="{ 'is-collapsed': isHistoryCollapsed }" aria-label="历史对话">
           <div class="history-section-header">
-            <span class="section-label">历史对话</span>
+            <div class="history-section-header-start">
+              <span class="section-label">历史对话</span>
+              <button
+                type="button"
+                class="history-collapse-toggle"
+                :class="{ 'is-collapsed': isHistoryCollapsed }"
+                :aria-expanded="!isHistoryCollapsed"
+                aria-controls="history-list"
+                :aria-label="historyToggleLabel"
+                :title="historyToggleLabel"
+                @click="toggleHistory"
+              >
+                <span class="history-collapse-chevron" aria-hidden="true"></span>
+              </button>
+            </div>
             <button
               type="button"
-              class="history-collapse-toggle"
-              :class="{ 'is-collapsed': isHistoryCollapsed }"
-              :aria-expanded="!isHistoryCollapsed"
-              aria-controls="history-list"
-              :aria-label="historyToggleLabel"
-              :title="historyToggleLabel"
-              @click="toggleHistory"
+              class="history-new-conversation"
+              title="新建对话"
+              aria-label="新建对话"
+              @click="startNewConversation"
             >
-              <span class="history-collapse-chevron" aria-hidden="true"></span>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+              </svg>
             </button>
           </div>
 
@@ -817,9 +1174,12 @@ onBeforeUnmount(() => {
                 <span class="history-title">{{ item.title }}</span>
               </button>
               <NDropdown
-                trigger="click"
+                trigger="manual"
                 placement="bottom-end"
+                :show="openHistoryActionSessionId === item.id"
                 :options="historyActionOptions"
+                @update:show="(show) => { if (!show) closeHistoryActionMenu(); }"
+                @clickoutside="closeHistoryActionMenu"
                 @select="(key) => handleHistoryAction(item.id, key)"
               >
                 <button
@@ -827,6 +1187,7 @@ onBeforeUnmount(() => {
                   class="history-action"
                   :aria-label="`历史对话操作：${item.title}`"
                   title="更多操作"
+                  @click="toggleHistoryActionMenu(item.id, $event)"
                 >
                   <span aria-hidden="true"></span>
                 </button>
@@ -846,10 +1207,17 @@ onBeforeUnmount(() => {
               <strong>PersonalClaw</strong>
               <span>{{ modeLabel }}</span>
             </div>
-            <button type="button" class="sidebar-footer-icon" title="模型配置" aria-label="模型配置" @click="openModelConfig">
+            <button
+              type="button"
+              class="sidebar-footer-icon"
+              :class="{ 'is-active': activeNavigationKey === 'settings' }"
+              title="设置"
+              aria-label="进入设置"
+              @click="openSettings"
+            >
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.7"/>
-                <path d="M12 3v3M12 18v3M4.2 7.5l2.6 1.5M17.2 15l2.6 1.5M19.8 7.5L17.2 9M6.8 15l-2.6 1.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+                <path d="M12 3.5v2.2M12 18.3v2.2M5.8 5.8l1.6 1.6M16.6 16.6l1.6 1.6M3.5 12h2.2M18.3 12h2.2M5.8 18.2l1.6-1.6M16.6 7.4l1.6-1.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
               </svg>
             </button>
           </div>
@@ -872,16 +1240,75 @@ onBeforeUnmount(() => {
           :is-streaming="isConversationStreaming"
           :model-label="modelLabel"
           :diagnostic-message="latestAgentDiagnostic"
-          :thinking-preview="latestThinkingPreview"
           :thinking-level="thinkingLevel"
           :can-use-thinking="activeModelSupportsThinking"
-          :work-status-label="workStatusLabel"
           @update:thinking-level="updateThinkingLevel"
           @send="sendConversationMessage"
           @open-model-config="openModelConfig"
         />
 
         <ModelConfig v-else-if="activeNavigationKey === 'model-config'" />
+
+        <ProjectConfig
+          v-else-if="activeNavigationKey === 'project-config'"
+          :projects="projects"
+          :active-project-id="selectedProjectId"
+          :error="taskCoreError"
+          :loading="isTaskCoreLoading"
+          @changed="handleProjectConfigChanged"
+        />
+
+        <section v-else-if="activeNavigationKey === 'settings'" class="settings-page" aria-label="设置">
+          <aside class="settings-sidebar" aria-label="设置导航">
+            <header class="settings-sidebar-header">
+              <button
+                type="button"
+                class="settings-back-button"
+                title="返回主页"
+                aria-label="返回主页"
+                @click="returnHome"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+              <div>
+                <p class="eyebrow">应用设置</p>
+                <h1>设置</h1>
+              </div>
+            </header>
+
+            <nav class="settings-section-list" aria-label="设置列表">
+              <button
+                v-for="section in settingsSections"
+                :key="section.id"
+                type="button"
+                class="settings-section-button"
+                :class="{ 'is-active': activeSettingsSectionId === section.id }"
+                :aria-current="activeSettingsSectionId === section.id ? 'page' : undefined"
+                @click="activeSettingsSectionId = section.id"
+              >
+                <span>{{ section.label }}</span>
+                <small>{{ section.detail }}</small>
+              </button>
+            </nav>
+          </aside>
+
+          <section class="settings-editor-panel" aria-label="系统提示词">
+            <div class="settings-editor-heading">
+              <div>
+                <p class="eyebrow">系统提示词</p>
+                <h2>任务提示词</h2>
+              </div>
+            </div>
+            <textarea
+              v-model="systemPromptDraft"
+              class="settings-prompt-textarea"
+              aria-label="系统提示词文本"
+              spellcheck="false"
+            ></textarea>
+          </section>
+        </section>
 
         <section v-else class="config-workspace" :aria-label="activeNavigation.title">
           <div class="config-summary">
@@ -891,14 +1318,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <div v-if="activeNavigationKey === 'project-config'" class="settings-list">
-            <div v-for="row in projectRows" :key="row.id" class="settings-row">
-              <span>{{ row.label }}</span>
-              <strong>{{ row.value }}</strong>
-            </div>
-          </div>
-
-          <div v-else-if="activeNavigationKey === 'task-sources'" class="settings-list">
+          <div v-if="activeNavigationKey === 'task-sources'" class="settings-list">
             <div v-for="row in sourceRows" :key="row.id" class="settings-row">
               <span>{{ row.label }}</span>
               <strong>{{ row.value }}</strong>
@@ -929,79 +1349,198 @@ onBeforeUnmount(() => {
         </button>
 
         <div v-if="!isTaskPaneCollapsed" id="task-information-content" class="right-pane-content">
-          <section class="task-panel">
-            <div class="task-heading task-heading-with-toggle">
-              <span>任务信息</span>
-              <NTag type="info" size="small">分析中</NTag>
+          <section class="task-panel task-panel-primary">
+            <div class="task-panel-title-row">
+              <h2>任务</h2>
+              <button type="button" class="task-primary-button" @click="openCreateTaskDialog">
+                新建任务
+              </button>
             </div>
-            <h2>个人任务管理智能体</h2>
-            <dl class="task-meta">
-              <div>
-                <dt>来源</dt>
-                <dd>新建对话</dd>
-              </div>
-              <div>
-                <dt>项目</dt>
-                <dd>PersonalClaw</dd>
-              </div>
-              <div>
-                <dt>自动化等级</dt>
-                <dd>L0 建议</dd>
-              </div>
-            </dl>
+
+            <div class="task-tab-list" role="tablist" aria-label="任务筛选">
+              <button type="button" :class="{ 'is-active': taskTab === 'all' }" @click="taskTab = 'all'">
+                全部 {{ taskBoardCounts.total }}
+              </button>
+              <button type="button" :class="{ 'is-active': taskTab === 'todo' }" @click="taskTab = 'todo'">
+                待处理 {{ taskBoardCounts.active }}
+              </button>
+              <button type="button" :class="{ 'is-active': taskTab === 'done' }" @click="taskTab = 'done'">
+                完成 {{ taskBoardCounts.done }}
+              </button>
+              <button type="button" :class="{ 'is-active': taskTab === 'blocked' }" @click="taskTab = 'blocked'">
+                阻塞 {{ taskBoardCounts.blocked }}
+              </button>
+            </div>
+
+            <div v-if="filteredTaskList.length" class="task-list">
+              <button
+                v-for="task in filteredTaskList"
+                :key="task.id"
+                type="button"
+                class="task-row-button"
+                :class="{ 'is-active': task.id === selectedTaskId }"
+                @click="selectedTaskId = task.id"
+              >
+                <span>
+                  <strong>{{ task.title }}</strong>
+                  <small>{{ projectNameById.get(task.projectId) ?? "未知项目" }} · {{ task.source.kind }} · {{ task.priority }}</small>
+                </span>
+                <NTag :type="taskTagType(task.status)" size="small">{{ taskStatusLabel(task.status) }}</NTag>
+              </button>
+            </div>
+            <p v-else-if="isTaskCoreLoading" class="empty">正在加载任务系统。</p>
+            <p v-else class="empty">暂无任务。</p>
+            <p v-if="taskCoreError" class="error-line">{{ taskCoreError }}</p>
+          </section>
+
+          <section v-if="selectedTask" class="task-panel">
+            <div class="task-heading">
+              <span>任务状态</span>
+              <NTag :type="taskTagType(selectedTask.status)" size="small">
+                {{ taskStatusLabel(selectedTask.status) }}
+              </NTag>
+            </div>
+            <h2>{{ selectedTask.title }}</h2>
+            <p class="task-goal">{{ selectedTask.goal }}</p>
 
             <div class="progress-block">
               <div>
                 <span>完成进度</span>
-                <strong>{{ taskProgressPercent }}%</strong>
+                <strong>{{ selectedTask.progressPercent }}%</strong>
               </div>
               <div class="progress-track" aria-hidden="true">
-                <span :style="{ width: `${taskProgressPercent}%` }"></span>
+                <span :style="{ width: `${selectedTask.progressPercent}%` }"></span>
               </div>
             </div>
 
-            <ol class="progress-list">
-              <li v-for="item in taskProgressItems" :key="item.id" :class="`is-${item.status}`">
-                <span></span>
-                {{ item.label }}
-              </li>
-            </ol>
-          </section>
-
-          <section class="task-panel">
-            <div class="task-heading">
-              <span>运行时</span>
-              <NTag :type="statusType(overallStatus)" size="small">{{ overallStatus }}</NTag>
+            <div class="task-action-grid">
+              <label>
+                <span>状态</span>
+                <select v-model="selectedStatusDraft">
+                  <option v-for="status in taskStatusOptions" :key="status" :value="status">
+                    {{ taskStatusLabel(status) }}
+                  </option>
+                </select>
+              </label>
+              <button type="button" @click="updateSelectedTaskStatus">更新状态</button>
             </div>
-            <div class="worker-list">
-              <div v-for="worker in workerRows" :key="worker.name" class="worker-row">
-                <div>
-                  <strong>{{ worker.name }}</strong>
-                  <small>PID {{ worker.pid ?? "pending" }}</small>
-                </div>
-                <NTag :type="statusType(worker.status)" size="small">
-                  {{ worker.status }}
-                </NTag>
+
+            <div class="task-action-grid">
+              <label>
+                <span>进度</span>
+                <input v-model.number="selectedProgressDraft" type="range" min="0" max="100" />
+              </label>
+              <button type="button" @click="updateSelectedTaskProgress">保存进度</button>
+            </div>
+
+            <div class="task-action-grid">
+              <label>
+                <span>执行器</span>
+                <select v-model="selectedCodeAgentDraft">
+                  <option value="">未分配</option>
+                  <option v-for="profile in codeAgentOptions" :key="profile.id" :value="profile.id">
+                    {{ profile.label }}
+                  </option>
+                </select>
+              </label>
+              <button type="button" @click="assignSelectedTaskCodeAgent">分配</button>
+            </div>
+
+            <dl class="task-meta">
+              <div>
+                <dt>项目</dt>
+                <dd>{{ projectNameById.get(selectedTask.projectId) ?? "未知项目" }}</dd>
               </div>
-            </div>
-            <p v-if="system.error" class="error-line">{{ system.error }}</p>
-          </section>
+              <div>
+                <dt>执行器</dt>
+                <dd>{{ selectedTaskCodeAgent?.label ?? "未分配" }}</dd>
+              </div>
+              <div>
+                <dt>下一步</dt>
+                <dd>{{ selectedTask.nextStep ?? "待补充" }}</dd>
+              </div>
+              <div>
+                <dt>更新</dt>
+                <dd>{{ new Date(selectedTask.updatedAt).toLocaleString() }}</dd>
+              </div>
+            </dl>
 
-          <section class="task-panel">
-            <div class="task-heading">
-              <span>最近事件</span>
-              <small>{{ system.events.length }}</small>
-            </div>
-            <ol v-if="system.events.length" class="event-list">
-              <li v-for="event in system.events.slice(0, 4)" :key="event.id">
-                <time>{{ new Date(event.timestamp).toLocaleTimeString() }}</time>
-                <span>{{ event.type }}</span>
+            <ol v-if="selectedTaskView?.recentEvents.length" class="event-list task-event-list">
+              <li v-for="event in selectedTaskView.recentEvents.slice(0, 4)" :key="event.id">
+                <time>#{{ event.sequence }}</time>
+                <span>{{ event.eventType }}</span>
               </li>
             </ol>
-            <p v-else class="empty">等待系统事件。</p>
+
+            <button type="button" class="task-danger-button" @click="deleteSelectedTask">
+              删除任务
+            </button>
           </section>
         </div>
       </aside>
+
+      <div
+        v-if="isCreateTaskDialogOpen"
+        class="task-dialog-backdrop"
+        role="presentation"
+        @click.self="closeCreateTaskDialog"
+      >
+        <section class="task-dialog" role="dialog" aria-modal="true" aria-label="新建任务">
+          <div class="task-dialog-header">
+            <div>
+              <p class="eyebrow">测试入口</p>
+              <h2>新建任务</h2>
+            </div>
+            <button type="button" class="task-dialog-close" aria-label="关闭" @click="closeCreateTaskDialog">
+              ×
+            </button>
+          </div>
+          <form class="task-create-form" @submit.prevent="createTaskFromPane">
+            <label>
+              <span>所属项目</span>
+              <select v-model="newTaskProjectId" :disabled="!projects.length">
+                <option v-for="project in projects" :key="project.id" :value="project.id">
+                  {{ project.name }}
+                </option>
+              </select>
+            </label>
+            <label>
+              <span>任务标题</span>
+              <input v-model="newTaskTitle" type="text" placeholder="任务标题" />
+            </label>
+            <label>
+              <span>任务目标</span>
+              <textarea v-model="newTaskGoal" rows="5" placeholder="任务目标和完成标准"></textarea>
+            </label>
+            <div class="task-form-grid">
+              <label>
+                <span>优先级</span>
+                <select v-model="newTaskPriority">
+                  <option v-for="priority in taskPriorityOptions" :key="priority" :value="priority">
+                    {{ priority }}
+                  </option>
+                </select>
+              </label>
+              <label>
+                <span>执行器</span>
+                <select v-model="newTaskCodeAgentId">
+                  <option value="">未分配</option>
+                  <option v-for="profile in codeAgentOptions" :key="profile.id" :value="profile.id">
+                    {{ profile.label }}
+                  </option>
+                </select>
+              </label>
+            </div>
+            <p class="task-dialog-note">当前入口仅用于测试，后续任务会由智能体和任务来源创建。</p>
+            <div class="task-dialog-actions">
+              <button type="button" @click="closeCreateTaskDialog">取消</button>
+              <button type="submit" :disabled="!newTaskProjectId || !newTaskTitle.trim() || !newTaskGoal.trim()">
+                创建
+              </button>
+            </div>
+          </form>
+        </section>
+      </div>
     </main>
   </NConfigProvider>
 </template>

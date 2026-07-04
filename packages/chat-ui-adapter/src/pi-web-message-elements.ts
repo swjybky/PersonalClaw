@@ -1,4 +1,5 @@
 import { html, LitElement, type TemplateResult } from "lit";
+import { prepareMarkdownContent } from "./markdown-content";
 
 type MessageChunk =
   | { type: "text"; text: string }
@@ -29,7 +30,7 @@ class AdapterUserMessage extends LitElement {
     return html`
       <div class="pc-user-message-row">
         <div class="pc-user-message-pill">
-          <markdown-block .content=${readUserText(this.message)}></markdown-block>
+          <markdown-block .content=${prepareMarkdownContent(readUserText(this.message))}></markdown-block>
         </div>
       </div>
     `;
@@ -59,9 +60,7 @@ class AdapterAssistantMessage extends LitElement {
 
     return html`
       <div class="pc-assistant-message">
-        ${chunks.length > 0
-          ? chunks.map((chunk) => renderAssistantChunk(chunk, this.isStreaming))
-          : renderAssistantPlaceholder(this.isStreaming)}
+        ${chunks.length > 0 ? chunks.map((chunk) => renderAssistantChunk(chunk, this.isStreaming)) : ""}
       </div>
     `;
   }
@@ -140,7 +139,7 @@ function readAssistantChunks(message: unknown): MessageChunk[] {
 
 function renderAssistantChunk(chunk: MessageChunk, isStreaming: boolean): TemplateResult {
   if (chunk.type === "text") {
-    return html`<markdown-block class="pc-assistant-markdown" .content=${chunk.text}></markdown-block>`;
+    return html`<markdown-block class="pc-assistant-markdown" .content=${prepareMarkdownContent(chunk.text)}></markdown-block>`;
   }
 
   if (chunk.type === "thinking") {
@@ -158,10 +157,6 @@ function renderAssistantChunk(chunk: MessageChunk, isStreaming: boolean): Templa
       <pre>${formatToolArguments(chunk.arguments)}</pre>
     </div>
   `;
-}
-
-function renderAssistantPlaceholder(isStreaming: boolean): TemplateResult | string {
-  return isStreaming ? html`<span class="pc-assistant-placeholder">正在等待模型输出...</span>` : "";
 }
 
 function formatToolArguments(value: unknown): string {

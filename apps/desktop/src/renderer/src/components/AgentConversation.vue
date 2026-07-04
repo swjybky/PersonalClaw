@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   configurePiWebMessageEditor,
+  prepareMarkdownContent,
   registerPiWebUiElements,
   type PiWebMessageEditorElement,
   type UiMessage,
@@ -17,10 +18,8 @@ const props = defineProps<{
   draft: string;
   modelLabel: string;
   diagnosticMessage: string | null;
-  thinkingPreview: string;
   thinkingLevel: ThinkingLevel;
   canUseThinking: boolean;
-  workStatusLabel: string;
 }>();
 
 const emit = defineEmits<{
@@ -40,6 +39,7 @@ const isEditorReady = ref(false);
 const piWebLoadError = ref<string | null>(null);
 const isModelMenuOpen = ref(false);
 const isThinkingMenuOpen = ref(false);
+const thinkingToggleState = ref<Record<string, boolean>>({});
 
 const thinkingOptions: ReadonlyArray<{ value: ThinkingLevel; label: string }> = [
   { value: "off", label: "关" },
@@ -64,10 +64,6 @@ const thinkingButtonLabel = computed(() => (props.canUseThinking ? thinkingLabel
 const thinkingButtonTitle = computed(() =>
   props.canUseThinking ? `思考等级：${thinkingLabel.value}` : "当前模型未标记支持 thinking，发送时自动关闭"
 );
-const shouldShowThinkingWaiting = computed(
-  () => props.canUseThinking && props.thinkingLevel !== "off" && isStreaming.value && !props.thinkingPreview
-);
-const toolCallSummary = computed(() => (props.toolCalls.length > 0 ? `${props.toolCalls.length} 个` : "暂无"));
 
 function syncPiWebEditor(): void {
   if (messageEditorElement.value) {
@@ -157,16 +153,80 @@ function refreshCustomElementFlags(): void {
   isEditorReady.value = customElements.get("message-editor") !== undefined;
 }
 
-function messageDisplayContent(message: UiMessage): string {
-  if (message.content) {
-    return message.content;
+function isLatestAssistantMessage(message: UiMessage): boolean {
+  for (let index = props.messages.length - 1; index >= 0; index -= 1) {
+    const candidate = props.messages[index];
+
+    if (candidate?.role === "assistant") {
+      return candidate.id === message.id;
+    }
   }
 
-  if (message.role === "assistant" && isStreaming.value) {
-    return "正在等待模型输出...";
+  return false;
+}
+
+function messageDisplayContent(message: UiMessage): string {
+  if (message.content) {
+    return prepareMarkdownContent(message.content);
   }
 
   return "";
+}
+
+function hasThinking(message: UiMessage): boolean {
+  return message.role === "assistant" && Boolean(message.thinking?.trim());
+}
+
+function isWaitingForThinking(message: UiMessage): boolean {
+  return (
+    props.canUseThinking &&
+    props.thinkingLevel !== "off" &&
+    isStreaming.value &&
+    message.role === "assistant" &&
+    isLatestAssistantMessage(message) &&
+    !message.content.trim() &&
+    !message.thinking?.trim()
+  );
+}
+
+function shouldShowThinkingBlock(message: UiMessage): boolean {
+  return hasThinking(message) || isWaitingForThinking(message);
+}
+
+function isThinkingActive(message: UiMessage): boolean {
+  if (!isStreaming.value || message.role !== "assistant" || !isLatestAssistantMessage(message)) {
+    return false;
+  }
+
+  if (message.content.trim()) {
+    return false;
+  }
+
+  return hasThinking(message) || isWaitingForThinking(message);
+}
+
+function isThinkingExpanded(message: UiMessage): boolean {
+  if (isWaitingForThinking(message)) {
+    return true;
+  }
+
+  if (!hasThinking(message)) {
+    return false;
+  }
+
+  const manualState = thinkingToggleState.value[message.id];
+
+  if (manualState !== undefined) {
+    return manualState;
+  }
+
+  return isThinkingActive(message);
+}
+
+function toggleThinking(message: UiMessage): void {
+  const next = !isThinkingExpanded(message);
+
+  thinkingToggleState.value = { ...thinkingToggleState.value, [message.id]: next };
 }
 
 async function selectModel(id: string): Promise<void> {
@@ -264,7 +324,7 @@ watch(
     <div v-if="isEmptyState" class="conversation-hero">
       <h1>我们应该在 PersonalClaw 中构建什么？</h1>
       <p class="conversation-hero-hint">
-        描述一个任务，pi-agent 会通过 loop agent 循环把它整理成可执行的任务草稿。
+        这里是你的个人任务助手，可以帮你管理所有的任务和进程。
       </p>
     </div>
 
@@ -274,37 +334,6 @@ watch(
     </div>
 
     <div v-if="!isEmptyState" class="conversation-stage" ref="conversationScrollElement">
-      <div v-if="workStatusLabel" class="conversation-work-status">
-        {{ workStatusLabel }}
-      </div>
-
-      <div class="conversation-run-meta" aria-label="运行状态">
-        <span>思考：{{ canUseThinking ? thinkingLabel : "跟随模型" }}</span>
-        <span>工具调用：{{ toolCallSummary }}</span>
-        <span>{{ isStreaming ? "等待模型输出" : "空闲" }}</span>
-      </div>
-
-      <div v-if="piWebLoadError" class="conversation-inline-warning" role="status">
-        {{ piWebLoadError }}，已切换为内置消息渲染。
-      </div>
-
-      <div v-if="thinkingPreview" class="conversation-thinking-preview" aria-label="模型思考">
-        <strong>模型思考</strong>
-        <pre>{{ thinkingPreview }}</pre>
-      </div>
-      <div v-else-if="shouldShowThinkingWaiting" class="conversation-thinking-preview is-waiting" aria-label="模型思考">
-        <strong>模型思考</strong>
-        <p>正在等待模型返回思考流...</p>
-      </div>
-
-      <div v-if="toolCalls.length" class="conversation-tool-call-list" aria-label="工具调用">
-        <strong>工具调用</strong>
-        <div v-for="toolCall in toolCalls" :key="toolCall.id" class="conversation-tool-call">
-          <span>{{ toolCall.name }}</span>
-          <small>{{ toolCall.status }} · {{ toolCall.summary }}</small>
-        </div>
-      </div>
-
       <div class="conversation-stream pi-web-message-scroll">
         <div class="native-message-list">
           <article
@@ -314,12 +343,44 @@ watch(
             :class="`is-${message.role}`"
           >
             <div class="native-message-bubble">
+              <div
+                v-if="shouldShowThinkingBlock(message)"
+                class="thinking-block"
+                :class="{ 'is-active': isThinkingActive(message) }"
+              >
+                <button
+                  type="button"
+                  class="thinking-block-header"
+                  :aria-expanded="isThinkingExpanded(message)"
+                  :aria-controls="`thinking-block-body-${message.id}`"
+                  @click="toggleThinking(message)"
+                >
+                  <span class="thinking-block-label">thinking</span>
+                  <span class="thinking-block-chevron" aria-hidden="true"></span>
+                </button>
+                <div
+                  v-show="isThinkingExpanded(message)"
+                  :id="`thinking-block-body-${message.id}`"
+                  class="thinking-block-body"
+                >
+                  <markdown-block
+                    v-if="isMarkdownReady && message.thinking?.trim()"
+                    class="thinking-block-markdown"
+                    :is-thinking.prop="true"
+                    :content.prop="prepareMarkdownContent(message.thinking ?? '')"
+                  ></markdown-block>
+                  <span v-else-if="message.thinking?.trim()" class="thinking-block-plain">{{ message.thinking }}</span>
+                  <p v-else class="thinking-block-waiting">正在等待模型返回思考流...</p>
+                </div>
+              </div>
+
               <markdown-block
-                v-if="isMarkdownReady"
+                v-if="isMarkdownReady && messageDisplayContent(message)"
+                :key="`${message.id}:${message.content.length}`"
                 class="native-message-markdown"
                 :content.prop="messageDisplayContent(message)"
               ></markdown-block>
-              <span v-else>{{ messageDisplayContent(message) }}</span>
+              <span v-else-if="messageDisplayContent(message)">{{ messageDisplayContent(message) }}</span>
             </div>
           </article>
         </div>
@@ -332,6 +393,7 @@ watch(
           <textarea
             v-if="!isEditorReady"
             class="composer-native-input"
+            rows="4"
             :value="draft"
             placeholder="描述一个任务，按 Enter 发送，Shift+Enter 换行"
             :disabled="isStreaming"

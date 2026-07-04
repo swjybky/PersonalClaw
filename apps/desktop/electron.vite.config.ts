@@ -14,7 +14,6 @@ const aliases = {
   "@personal-claw/pi-runtime-adapter": resolve(workspaceRoot, "packages/pi-runtime-adapter/src/index.ts"),
   "@personal-claw/chat-ui-adapter": resolve(workspaceRoot, "packages/chat-ui-adapter/src/index.ts"),
   "@personal-claw/tool-sdk": resolve(workspaceRoot, "packages/tool-sdk/src/index.ts"),
-  "@personal-claw/policy-engine": resolve(workspaceRoot, "packages/policy-engine/src/index.ts"),
   "@personal-claw/scheduler": resolve(workspaceRoot, "packages/scheduler/src/index.ts")
 };
 
@@ -26,7 +25,7 @@ export default defineConfig({
     },
     build: {
       rollupOptions: {
-        external: ["electron"],
+        external: ["electron", "better-sqlite3"],
         input: {
           index: resolve(appRoot, "src/main/index.ts"),
           "utilities/core-entry": resolve(appRoot, "src/utilities/core-entry.ts"),

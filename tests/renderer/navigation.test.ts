@@ -22,4 +22,9 @@ describe("renderer navigation model", () => {
       "code-agent"
     ]);
   });
+
+  it("keeps settings addressable without adding it to the primary sidebar list", () => {
+    expect(getNavigationItem("settings").title).toBe("设置");
+    expect(navigationItems.some((item) => item.key === "settings")).toBe(false);
+  });
 });
