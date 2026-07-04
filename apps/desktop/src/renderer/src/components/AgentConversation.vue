@@ -2,58 +2,74 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   configurePiWebMessageEditor,
-  configurePiWebMessageList,
   registerPiWebUiElements,
   type PiWebMessageEditorElement,
-  type PiWebMessageListElement,
   type UiMessage,
   type UiToolCall
 } from "@personal-claw/chat-ui-adapter";
+import type { ThinkingLevel } from "@personal-claw/contracts";
 import { useModelConfigStore } from "../stores/modelConfig";
 
 const props = defineProps<{
   messages: readonly UiMessage[];
   toolCalls: readonly UiToolCall[];
+  isStreaming: boolean;
   draft: string;
   modelLabel: string;
-  modeLabel: string;
+  diagnosticMessage: string | null;
+  thinkingPreview: string;
+  thinkingLevel: ThinkingLevel;
+  canUseThinking: boolean;
+  workStatusLabel: string;
 }>();
 
 const emit = defineEmits<{
   send: [content: string];
   "update:draft": [value: string];
+  "update:thinking-level": [value: ThinkingLevel];
   "open-model-config": [];
 }>();
 
 const modelConfig = useModelConfigStore();
-const messageListElement = ref<PiWebMessageListElement | null>(null);
 const messageEditorElement = ref<PiWebMessageEditorElement | null>(null);
 const conversationScrollElement = ref<HTMLElement | null>(null);
 const modelPickerRef = ref<HTMLElement | null>(null);
-const isPiWebReady = ref(false);
+const thinkingPickerRef = ref<HTMLElement | null>(null);
+const isMarkdownReady = ref(false);
+const isEditorReady = ref(false);
+const piWebLoadError = ref<string | null>(null);
 const isModelMenuOpen = ref(false);
+const isThinkingMenuOpen = ref(false);
+
+const thinkingOptions: ReadonlyArray<{ value: ThinkingLevel; label: string }> = [
+  { value: "off", label: "关" },
+  { value: "minimal", label: "极简" },
+  { value: "low", label: "低" },
+  { value: "medium", label: "中" },
+  { value: "high", label: "高" }
+];
 
 const hasUserMessage = computed(() => props.messages.some((message) => message.role === "user"));
 const isEmptyState = computed(() => !hasUserMessage.value);
-const isStreaming = computed(() =>
+const hasPendingToolCall = computed(() =>
   props.toolCalls.some((toolCall) =>
     toolCall.status === "requested" || toolCall.status === "approved" || toolCall.status === "running"
   )
 );
+const isStreaming = computed(() => props.isStreaming || hasPendingToolCall.value);
+const thinkingLabel = computed(
+  () => thinkingOptions.find((option) => option.value === props.thinkingLevel)?.label ?? "关"
+);
+const thinkingButtonLabel = computed(() => (props.canUseThinking ? thinkingLabel.value : "跟随模型"));
+const thinkingButtonTitle = computed(() =>
+  props.canUseThinking ? `思考等级：${thinkingLabel.value}` : "当前模型未标记支持 thinking，发送时自动关闭"
+);
+const shouldShowThinkingWaiting = computed(
+  () => props.canUseThinking && props.thinkingLevel !== "off" && isStreaming.value && !props.thinkingPreview
+);
+const toolCallSummary = computed(() => (props.toolCalls.length > 0 ? `${props.toolCalls.length} 个` : "暂无"));
 
-function syncPiWebElements(): void {
-  if (!isPiWebReady.value) {
-    return;
-  }
-
-  if (messageListElement.value) {
-    configurePiWebMessageList(messageListElement.value, {
-      messages: props.messages,
-      toolCalls: props.toolCalls,
-      isStreaming: isStreaming.value
-    });
-  }
-
+function syncPiWebEditor(): void {
   if (messageEditorElement.value) {
     configurePiWebMessageEditor(messageEditorElement.value, {
       value: props.draft,
@@ -105,14 +121,52 @@ function closeModelMenu(): void {
   isModelMenuOpen.value = false;
 }
 
-function handleDocumentClick(event: MouseEvent): void {
-  const target = event.target;
+function toggleThinkingMenu(event: MouseEvent): void {
+  event.stopPropagation();
 
-  if (!(target instanceof Node) || modelPickerRef.value?.contains(target)) {
+  if (!props.canUseThinking) {
+    closeThinkingMenu();
     return;
   }
 
-  closeModelMenu();
+  isThinkingMenuOpen.value = !isThinkingMenuOpen.value;
+}
+
+function closeThinkingMenu(): void {
+  isThinkingMenuOpen.value = false;
+}
+
+function handleDocumentClick(event: MouseEvent): void {
+  const target = event.target;
+
+  if (!(target instanceof Node)) {
+    return;
+  }
+
+  if (!modelPickerRef.value?.contains(target)) {
+    closeModelMenu();
+  }
+
+  if (!thinkingPickerRef.value?.contains(target)) {
+    closeThinkingMenu();
+  }
+}
+
+function refreshCustomElementFlags(): void {
+  isMarkdownReady.value = customElements.get("markdown-block") !== undefined;
+  isEditorReady.value = customElements.get("message-editor") !== undefined;
+}
+
+function messageDisplayContent(message: UiMessage): string {
+  if (message.content) {
+    return message.content;
+  }
+
+  if (message.role === "assistant" && isStreaming.value) {
+    return "正在等待模型输出...";
+  }
+
+  return "";
 }
 
 async function selectModel(id: string): Promise<void> {
@@ -128,6 +182,17 @@ async function selectModel(id: string): Promise<void> {
 function openModelConfigPage(): void {
   closeModelMenu();
   emit("open-model-config");
+}
+
+function selectThinkingLevel(level: ThinkingLevel): void {
+  if (!props.canUseThinking) {
+    emit("update:thinking-level", "off");
+    closeThinkingMenu();
+    return;
+  }
+
+  emit("update:thinking-level", level);
+  closeThinkingMenu();
 }
 
 function sendDraft(): void {
@@ -152,12 +217,18 @@ onMounted(() => {
   document.addEventListener("click", handleDocumentClick);
 
   registerPiWebUiElements().then(async () => {
-    isPiWebReady.value = true;
+    refreshCustomElementFlags();
+
+    if (!isMarkdownReady.value) {
+      piWebLoadError.value = "Markdown 渲染组件未注册";
+    }
+
     await nextTick();
-    syncPiWebElements();
+    syncPiWebEditor();
     scrollToLatestMessage();
   }).catch((error: unknown) => {
-    throw error instanceof Error ? error : new Error("pi-web-ui 组件注册失败。");
+    refreshCustomElementFlags();
+    piWebLoadError.value = error instanceof Error ? error.message : "pi-web-ui 组件注册失败。";
   });
 });
 
@@ -168,16 +239,28 @@ onBeforeUnmount(() => {
 watch(
   () => [props.messages, props.toolCalls, props.draft, isStreaming.value],
   async () => {
-    syncPiWebElements();
+    syncPiWebEditor();
     await nextTick();
     scrollToLatestMessage();
   },
   { deep: true }
 );
+
+watch(
+  () => props.canUseThinking,
+  (canUseThinking) => {
+    if (!canUseThinking) {
+      closeThinkingMenu();
+    }
+  }
+);
 </script>
 
 <template>
-  <section class="conversation-workspace" :class="{ 'is-empty': isEmptyState }">
+  <section
+    class="conversation-workspace"
+    :class="{ 'is-empty': isEmptyState, 'has-diagnostic': diagnosticMessage }"
+  >
     <div v-if="isEmptyState" class="conversation-hero">
       <h1>我们应该在 PersonalClaw 中构建什么？</h1>
       <p class="conversation-hero-hint">
@@ -185,16 +268,60 @@ watch(
       </p>
     </div>
 
-    <div v-else class="conversation-stage" ref="conversationScrollElement">
-      <div class="conversation-stream pi-web-message-scroll">
-        <message-list v-if="isPiWebReady" ref="messageListElement" class="pi-message-list"></message-list>
+    <div v-if="diagnosticMessage" class="conversation-diagnostic" role="alert">
+      <strong>模型接口错误</strong>
+      <pre>{{ diagnosticMessage }}</pre>
+    </div>
 
-        <div v-if="toolCalls.length" class="tool-call-strip" aria-label="工具调用状态">
-          <div v-for="tool in toolCalls" :key="tool.id" class="tool-call">
-            <span>{{ tool.name }}</span>
-            <strong>{{ tool.status }}</strong>
-            <small>{{ tool.summary }}</small>
-          </div>
+    <div v-if="!isEmptyState" class="conversation-stage" ref="conversationScrollElement">
+      <div v-if="workStatusLabel" class="conversation-work-status">
+        {{ workStatusLabel }}
+      </div>
+
+      <div class="conversation-run-meta" aria-label="运行状态">
+        <span>思考：{{ canUseThinking ? thinkingLabel : "跟随模型" }}</span>
+        <span>工具调用：{{ toolCallSummary }}</span>
+        <span>{{ isStreaming ? "等待模型输出" : "空闲" }}</span>
+      </div>
+
+      <div v-if="piWebLoadError" class="conversation-inline-warning" role="status">
+        {{ piWebLoadError }}，已切换为内置消息渲染。
+      </div>
+
+      <div v-if="thinkingPreview" class="conversation-thinking-preview" aria-label="模型思考">
+        <strong>模型思考</strong>
+        <pre>{{ thinkingPreview }}</pre>
+      </div>
+      <div v-else-if="shouldShowThinkingWaiting" class="conversation-thinking-preview is-waiting" aria-label="模型思考">
+        <strong>模型思考</strong>
+        <p>正在等待模型返回思考流...</p>
+      </div>
+
+      <div v-if="toolCalls.length" class="conversation-tool-call-list" aria-label="工具调用">
+        <strong>工具调用</strong>
+        <div v-for="toolCall in toolCalls" :key="toolCall.id" class="conversation-tool-call">
+          <span>{{ toolCall.name }}</span>
+          <small>{{ toolCall.status }} · {{ toolCall.summary }}</small>
+        </div>
+      </div>
+
+      <div class="conversation-stream pi-web-message-scroll">
+        <div class="native-message-list">
+          <article
+            v-for="message in messages"
+            :key="message.id"
+            class="native-message"
+            :class="`is-${message.role}`"
+          >
+            <div class="native-message-bubble">
+              <markdown-block
+                v-if="isMarkdownReady"
+                class="native-message-markdown"
+                :content.prop="messageDisplayContent(message)"
+              ></markdown-block>
+              <span v-else>{{ messageDisplayContent(message) }}</span>
+            </div>
+          </article>
         </div>
       </div>
     </div>
@@ -203,7 +330,7 @@ watch(
       <div class="composer-card">
         <div class="composer-input pi-web-composer">
           <textarea
-            v-if="!isPiWebReady"
+            v-if="!isEditorReady"
             class="composer-native-input"
             :value="draft"
             placeholder="描述一个任务，按 Enter 发送，Shift+Enter 换行"
@@ -226,27 +353,46 @@ watch(
               </svg>
             </button>
 
-            <span class="composer-toolbar-chip is-access" :title="modeLabel">
-              <svg viewBox="0 0 24 24" aria-hidden="true" class="composer-access-icon">
-                <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.6"/>
-                <path d="M12 8v5M12 16.5v.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-              </svg>
-              {{ modeLabel }}
-            </span>
-
-            <span class="composer-toolbar-divider" aria-hidden="true"></span>
-
-            <span class="composer-toolbar-chip is-goal" title="目标">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.6"/>
-                <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.6"/>
-                <path d="M12 4V2M12 22v-2M4 12H2M22 12h-2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-              </svg>
-              目标
-            </span>
           </div>
 
           <div class="composer-toolbar-right">
+            <div ref="thinkingPickerRef" class="composer-model-picker">
+              <button
+                type="button"
+                class="composer-toolbar-chip is-thinking"
+                :class="{ 'is-disabled': !canUseThinking }"
+                :title="thinkingButtonTitle"
+                :aria-expanded="isThinkingMenuOpen"
+                aria-haspopup="listbox"
+                :disabled="!canUseThinking"
+                @click="toggleThinkingMenu"
+              >
+                <span class="composer-model-label">思考 {{ thinkingButtonLabel }}</span>
+                <span class="composer-chip-chevron" aria-hidden="true"></span>
+              </button>
+
+              <div
+                v-if="canUseThinking && isThinkingMenuOpen"
+                class="composer-model-menu"
+                role="listbox"
+                aria-label="选择思考等级"
+              >
+                <button
+                  v-for="option in thinkingOptions"
+                  :key="option.value"
+                  type="button"
+                  class="composer-model-menu-item"
+                  :class="{ 'is-selected': option.value === thinkingLevel }"
+                  role="option"
+                  :aria-selected="option.value === thinkingLevel"
+                  @click="selectThinkingLevel(option.value)"
+                >
+                  <span class="composer-model-menu-item-label">{{ option.label }}</span>
+                  <span v-if="option.value === thinkingLevel" class="composer-model-menu-check" aria-hidden="true">✓</span>
+                </button>
+              </div>
+            </div>
+
             <div ref="modelPickerRef" class="composer-model-picker">
               <button
                 type="button"

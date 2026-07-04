@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, nativeImage, shell } from "electron";
+import { app, BrowserWindow, Menu, ipcMain, nativeImage, shell } from "electron";
 import { join } from "node:path";
 import { resolveAppIconPath } from "./icon-path";
 import {
@@ -50,8 +50,15 @@ interface RendererSmokeSummary {
   };
   piWebComponents: {
     status: string;
-    hasMessageList: boolean;
+    hasMarkdownBlock: boolean;
     hasMessageEditor: boolean;
+    canRenderMarkdown: boolean;
+  };
+  conversationRender: {
+    status: string;
+    hasAssistantText: boolean;
+    hasStrong: boolean;
+    hasTable: boolean;
   };
 }
 
@@ -138,7 +145,7 @@ function registerIpcHandlers(): void {
       };
     }
 
-    if (command.type === "session.prompt") {
+    if (command.type === "session.prompt" || command.type === "task.draftFromDescription") {
       try {
         return await supervisor.requestCommand("agent", command);
       } catch (error: unknown) {
@@ -148,6 +155,22 @@ function registerIpcHandlers(): void {
           error: {
             code: "ipc.utility_command_failed",
             message: error instanceof Error ? error.message : "Utility command failed.",
+            details: serializeError(error)
+          }
+        };
+      }
+    }
+
+    if (command.type === "modelConfig.test") {
+      try {
+        return await supervisor.requestCommand("agent", command);
+      } catch (error: unknown) {
+        return {
+          status: "rejected",
+          requestId: command.id,
+          error: {
+            code: "modelConfig.test_failed",
+            message: error instanceof Error ? error.message : "Model config test failed.",
             details: serializeError(error)
           }
         };
@@ -232,6 +255,7 @@ function isRendererSmokeSummary(value: unknown): value is RendererSmokeSummary {
     navigation?: unknown;
     agent?: unknown;
     piWebComponents?: unknown;
+    conversationRender?: unknown;
   };
 
   if (typeof candidate.status !== "string" || !Array.isArray(candidate.workers)) {
@@ -250,6 +274,10 @@ function isRendererSmokeSummary(value: unknown): value is RendererSmokeSummary {
     return false;
   }
 
+  if (typeof candidate.conversationRender !== "object" || candidate.conversationRender === null) {
+    return false;
+  }
+
   const navigation = candidate.navigation as {
     beforeTitle?: unknown;
     afterTitle?: unknown;
@@ -263,8 +291,15 @@ function isRendererSmokeSummary(value: unknown): value is RendererSmokeSummary {
   };
   const piWebComponents = candidate.piWebComponents as {
     status?: unknown;
-    hasMessageList?: unknown;
+    hasMarkdownBlock?: unknown;
     hasMessageEditor?: unknown;
+    canRenderMarkdown?: unknown;
+  };
+  const conversationRender = candidate.conversationRender as {
+    status?: unknown;
+    hasAssistantText?: unknown;
+    hasStrong?: unknown;
+    hasTable?: unknown;
   };
 
   return (
@@ -274,8 +309,13 @@ function isRendererSmokeSummary(value: unknown): value is RendererSmokeSummary {
     typeof agent.status === "string" &&
     hasNullableString(agent.runtimeMode) &&
     typeof piWebComponents.status === "string" &&
-    typeof piWebComponents.hasMessageList === "boolean" &&
-    typeof piWebComponents.hasMessageEditor === "boolean"
+    typeof piWebComponents.hasMarkdownBlock === "boolean" &&
+    typeof piWebComponents.hasMessageEditor === "boolean" &&
+    typeof piWebComponents.canRenderMarkdown === "boolean" &&
+    typeof conversationRender.status === "string" &&
+    typeof conversationRender.hasAssistantText === "boolean" &&
+    typeof conversationRender.hasStrong === "boolean" &&
+    typeof conversationRender.hasTable === "boolean"
   );
 }
 
@@ -298,6 +338,7 @@ async function createMainWindow(options: { showWhenReady?: boolean } = {}): Prom
     minHeight: 680,
     title: "PersonalClaw",
     icon: iconPath,
+    autoHideMenuBar: true,
     show: false,
     backgroundColor: "#f7f7f2",
     webPreferences: {
@@ -423,25 +464,83 @@ async function runRendererSmoke(): Promise<void> {
             }
           }, 3000);
         });
+        const waitFor = async (predicate, timeoutMs = 5000) => {
+          const startedAt = Date.now();
+
+          while (Date.now() - startedAt < timeoutMs) {
+            const value = predicate();
+
+            if (value) {
+              return value;
+            }
+
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+
+          return null;
+        };
         const piWebComponents = await Promise.race([
           Promise.all([
-            customElements.whenDefined("message-list"),
+            customElements.whenDefined("markdown-block"),
             customElements.whenDefined("message-editor")
-          ]).then(() => ({
-            status: "ok",
-            hasMessageList: document.querySelector("message-list") instanceof HTMLElement,
-            hasMessageEditor: document.querySelector("message-editor") instanceof HTMLElement
-          })),
+          ]).then(async () => {
+            const probe = document.createElement("markdown-block");
+            probe.content = "**renderer markdown**\\n\\n| A | B |\\n| --- | --- |\\n| 1 | 2 |";
+            document.body.appendChild(probe);
+            await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const canRenderMarkdown =
+              probe.querySelector("strong") !== null &&
+              probe.querySelector("table") !== null;
+            probe.remove();
+
+            return {
+              status: "ok",
+              hasMarkdownBlock: customElements.get("markdown-block") !== undefined,
+              hasMessageEditor: customElements.get("message-editor") !== undefined,
+              canRenderMarkdown
+            };
+          }),
           new Promise((resolve) => {
             setTimeout(() => {
               resolve({
                 status: "pi_web_timeout",
-                hasMessageList: document.querySelector("message-list") instanceof HTMLElement,
-                hasMessageEditor: document.querySelector("message-editor") instanceof HTMLElement
+                hasMarkdownBlock: customElements.get("markdown-block") !== undefined,
+                hasMessageEditor: customElements.get("message-editor") !== undefined,
+                canRenderMarkdown: false
               });
             }, 3000);
           })
         ]);
+        const editor = await waitFor(() => document.querySelector("message-editor textarea, textarea.composer-native-input"));
+
+        if (editor instanceof HTMLTextAreaElement) {
+          editor.value = "renderer markdown smoke";
+          editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: editor.value }));
+          editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+        }
+
+        const conversationRender = await waitFor(() => {
+          const assistant = Array.from(document.querySelectorAll(".native-message.is-assistant")).at(-1);
+
+          if (!assistant) {
+            return null;
+          }
+
+          const text = assistant.textContent ?? "";
+          const result = {
+            status: "ok",
+            hasAssistantText: text.includes("pi-agent-core"),
+            hasStrong: assistant.querySelector("strong") !== null,
+            hasTable: assistant.querySelector("table") !== null
+          };
+
+          return result.hasAssistantText && result.hasStrong && result.hasTable ? result : null;
+        }, 6000) ?? {
+          status: "conversation_render_timeout",
+          hasAssistantText: false,
+          hasStrong: false,
+          hasTable: false
+        };
         const beforeTitle = document.querySelector("h1")?.textContent?.trim() ?? null;
         const projectButton = document.querySelector('[data-nav-key="project-config"]');
 
@@ -464,8 +563,13 @@ async function runRendererSmoke(): Promise<void> {
             navigationUpdated &&
             agent.status === "ok" &&
             piWebComponents.status === "ok" &&
-            piWebComponents.hasMessageList &&
-            piWebComponents.hasMessageEditor
+            piWebComponents.hasMessageEditor &&
+            piWebComponents.hasMarkdownBlock &&
+            piWebComponents.canRenderMarkdown &&
+            conversationRender.status === "ok" &&
+            conversationRender.hasAssistantText &&
+            conversationRender.hasStrong &&
+            conversationRender.hasTable
               ? health.status
               : "navigation_agent_or_pi_web_failed",
           workers: health.workers.map((worker) => ({
@@ -478,7 +582,8 @@ async function runRendererSmoke(): Promise<void> {
             activeKey
           },
           agent,
-          piWebComponents
+          piWebComponents,
+          conversationRender
         };
       })()
     `),
@@ -511,8 +616,12 @@ async function shutdownAndExit(exitCode = 0): Promise<void> {
 registerIpcHandlers();
 
 app.whenReady().then(async () => {
+  Menu.setApplicationMenu(null);
   validateAppIcon();
-  supervisor.setEnvironment({ PERSONAL_CLAW_USER_DATA_DIR: app.getPath("userData") });
+  supervisor.setEnvironment({
+    PERSONAL_CLAW_USER_DATA_DIR: app.getPath("userData"),
+    ...(process.env.PERSONAL_CLAW_RENDERER_SMOKE === "1" ? { PERSONAL_CLAW_PI_FORCE_FAUX: "1" } : {})
+  });
   supervisor.startAll();
 
   if (process.env.PERSONAL_CLAW_SMOKE === "1") {

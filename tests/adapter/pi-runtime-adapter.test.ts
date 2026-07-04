@@ -22,6 +22,8 @@ describe("pi runtime adapter", () => {
     const completed = events.find((event) => event.type === "agent.completed");
 
     expect(completed?.payload.content).toContain("pi-agent-core");
+    expect(completed?.payload.content).toContain("**pi-agent-core**");
+    expect(completed?.payload.content).toContain("| 项目 | 当前判断 |");
     expect(completed?.payload.runtime.mode).toBe("local-faux");
   });
 
@@ -56,6 +58,26 @@ describe("pi runtime adapter", () => {
     );
   });
 
+  it("fails fast when a real provider has no api key configured", () => {
+    const previous = process.env.DEEPSEEK_API_KEY;
+    delete process.env.DEEPSEEK_API_KEY;
+
+    try {
+      const runtime = new PiAgentRuntimeAdapter({
+        defaultModelRef: { provider: "deepseek", modelId: "deepseek-v4-pro" },
+        apiKeyResolver: () => ""
+      });
+
+      expect(() => runtime.describe()).toThrow("Missing API key for provider deepseek");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.DEEPSEEK_API_KEY;
+      } else {
+        process.env.DEEPSEEK_API_KEY = previous;
+      }
+    }
+  });
+
   it("falls back to the default model ref when the resolver throws or returns undefined", () => {
     const throwing = new PiAgentRuntimeAdapter({
       defaultModelRef: { provider: "faux", modelId: "from-default" },
@@ -72,6 +94,35 @@ describe("pi runtime adapter", () => {
     });
 
     expect(empty.describe().model).toBe("from-default");
+  });
+
+  it("describes a configured OpenAI-compatible custom endpoint", () => {
+    const previous = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+
+    try {
+      const runtime = new PiAgentRuntimeAdapter({
+        defaultModelRef: {
+          provider: "openai",
+          modelId: "local-model",
+          baseUrl: "http://localhost:11434/v1",
+          api: "openai-completions"
+        },
+        apiKeyResolver: () => "sk-local"
+      });
+
+      expect(runtime.describe()).toEqual({
+        provider: "openai",
+        model: "local-model",
+        mode: "provider"
+      });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.OPENAI_API_KEY;
+      } else {
+        process.env.OPENAI_API_KEY = previous;
+      }
+    }
   });
 });
 

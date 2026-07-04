@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  configurePiWebMessageList,
   piWebUiAdapterStatus,
   registerPiWebUiElements,
-  toPiWebMessages
+  toPiWebMessages,
+  type PiWebMessageListElement
 } from "@personal-claw/chat-ui-adapter";
 
 describe("chat UI adapter", () => {
@@ -58,5 +60,30 @@ describe("chat UI adapter", () => {
 
   it("does not register browser custom elements in the node test process", async () => {
     await expect(registerPiWebUiElements()).resolves.toBeUndefined();
+  });
+
+  it("passes streaming state through to the pi-web message list", () => {
+    const element = {
+      messages: [],
+      tools: [],
+      pendingToolCalls: new Set<string>(),
+      isStreaming: false
+    } as unknown as PiWebMessageListElement;
+
+    configurePiWebMessageList(element, {
+      messages: [
+        {
+          id: "message-user-1",
+          role: "user",
+          content: "生成任务草稿",
+          createdAt: "2026-07-04T13:30:00.000Z"
+        }
+      ],
+      toolCalls: [],
+      isStreaming: true
+    });
+
+    expect(element.isStreaming).toBe(true);
+    expect(element.pendingToolCalls?.size).toBe(0);
   });
 });

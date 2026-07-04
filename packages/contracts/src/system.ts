@@ -4,19 +4,27 @@ import {
   AgentErrorEventEnvelopeSchema,
   AgentMessageCompletedEventEnvelopeSchema,
   AgentMessageDeltaEventEnvelopeSchema,
+  AgentThinkingDeltaEventEnvelopeSchema,
   AgentToolRequestedEventEnvelopeSchema,
   SessionPromptCommandEnvelopeSchema,
   type AgentErrorEventEnvelope,
   type AgentMessageCompletedEventEnvelope,
   type AgentMessageDeltaEventEnvelope,
+  type AgentThinkingDeltaEventEnvelope,
   type AgentToolRequestedEventEnvelope
 } from "./session";
 import {
   ModelConfigDeleteCommandEnvelopeSchema,
   ModelConfigListCommandEnvelopeSchema,
   ModelConfigSetDefaultCommandEnvelopeSchema,
+  ModelConfigTestCommandEnvelopeSchema,
   ModelConfigUpsertCommandEnvelopeSchema
 } from "./model-config";
+import {
+  TaskDraftCreatedEventEnvelopeSchema,
+  TaskDraftFromDescriptionCommandEnvelopeSchema,
+  type TaskDraftCreatedEventEnvelope
+} from "./task-draft";
 
 export const UtilityWorkerNameSchema = z.enum(["core", "agent", "tool"]);
 export type UtilityWorkerName = z.infer<typeof UtilityWorkerNameSchema>;
@@ -67,10 +75,12 @@ export const SystemHealthCommandEnvelopeSchema = EnvelopeBaseSchema.extend({
 export const CommandEnvelopeSchema = z.discriminatedUnion("type", [
   SystemHealthCommandEnvelopeSchema,
   SessionPromptCommandEnvelopeSchema,
+  TaskDraftFromDescriptionCommandEnvelopeSchema,
   ModelConfigListCommandEnvelopeSchema,
   ModelConfigUpsertCommandEnvelopeSchema,
   ModelConfigDeleteCommandEnvelopeSchema,
-  ModelConfigSetDefaultCommandEnvelopeSchema
+  ModelConfigSetDefaultCommandEnvelopeSchema,
+  ModelConfigTestCommandEnvelopeSchema
 ]);
 
 export type CommandEnvelope = z.infer<typeof CommandEnvelopeSchema>;
@@ -123,9 +133,11 @@ export const SystemEventEnvelopeSchema = z.discriminatedUnion("type", [
   SystemErrorEventEnvelopeSchema,
   SystemWorkerRestartedEventEnvelopeSchema,
   AgentMessageDeltaEventEnvelopeSchema,
+  AgentThinkingDeltaEventEnvelopeSchema,
   AgentMessageCompletedEventEnvelopeSchema,
   AgentToolRequestedEventEnvelopeSchema,
-  AgentErrorEventEnvelopeSchema
+  AgentErrorEventEnvelopeSchema,
+  TaskDraftCreatedEventEnvelopeSchema
 ]);
 
 export type SystemEventEnvelope =
@@ -141,6 +153,8 @@ export type SystemEventEnvelope =
       "system.worker_restarted"
     >
   | AgentMessageDeltaEventEnvelope
+  | AgentThinkingDeltaEventEnvelope
   | AgentMessageCompletedEventEnvelope
   | AgentToolRequestedEventEnvelope
-  | AgentErrorEventEnvelope;
+  | AgentErrorEventEnvelope
+  | TaskDraftCreatedEventEnvelope;

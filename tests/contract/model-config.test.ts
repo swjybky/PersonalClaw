@@ -4,6 +4,7 @@ import {
   ModelConfigEntryInputSchema,
   ModelConfigSummaryListPayloadSchema,
   ModelConfigSummarySchema,
+  ModelConfigTestResultPayloadSchema,
   createEnvelope
 } from "@personal-claw/contracts";
 
@@ -95,5 +96,25 @@ describe("model config contracts", () => {
 
     expect(CommandEnvelopeSchema.parse(del).type).toBe("modelConfig.delete");
     expect(CommandEnvelopeSchema.parse(setDefault).type).toBe("modelConfig.setDefault");
+  });
+
+  it("routes modelConfig.test and validates its result payload", () => {
+    const test = createEnvelope("modelConfig.test", { id: "deepseek-flash" }, { id: "cmd_test" });
+
+    expect(CommandEnvelopeSchema.parse(test).type).toBe("modelConfig.test");
+    expect(
+      ModelConfigTestResultPayloadSchema.parse({
+        id: "deepseek-flash",
+        status: "ok",
+        checkedAt: "2026-07-04T08:00:00.000Z",
+        latencyMs: 120,
+        runtime: {
+          provider: "deepseek",
+          model: "deepseek-v4-flash",
+          mode: "provider"
+        },
+        message: "模型连通性测试通过。"
+      }).status
+    ).toBe("ok");
   });
 });

@@ -68,6 +68,79 @@ describe("agent model config file reader", () => {
     expect(new ModelConfigFileReader(tempDir).resolveDefault()).toBeUndefined();
   });
 
+  it("resolves a selected faux provider entry for connectivity testing", () => {
+    writeFileSync(
+      join(tempDir, "model-config.json"),
+      JSON.stringify({
+        version: 1,
+        defaultModelId: "faux",
+        entries: [
+          {
+            id: "faux",
+            label: "Local Faux",
+            provider: "faux",
+            modelId: "personal-task-manager",
+            apiKey: ""
+          }
+        ]
+      }),
+      "utf8"
+    );
+
+    const resolved = new ModelConfigFileReader(tempDir).resolveById("faux");
+
+    expect(resolved?.label).toBe("Local Faux");
+    expect(resolved?.provider).toBe("faux");
+    expect(resolved?.modelRef).toEqual({ provider: "faux", modelId: "personal-task-manager" });
+  });
+
+  it("resolves custom endpoint fields for runtime adapter testing", () => {
+    writeFileSync(
+      join(tempDir, "model-config.json"),
+      JSON.stringify({
+        version: 1,
+        defaultModelId: "openai-custom",
+        entries: [
+          {
+            id: "openai-custom",
+            label: "OpenAI Compatible",
+            provider: "openai",
+            modelId: "local-model",
+            baseUrl: "http://localhost:11434/v1",
+            api: "openai-completions",
+            reasoning: true,
+            apiKey: "sk-local"
+          }
+        ]
+      }),
+      "utf8"
+    );
+
+    const resolved = new ModelConfigFileReader(tempDir).resolveById("openai-custom");
+
+    expect(resolved?.modelRef).toEqual({
+      provider: "openai",
+      modelId: "local-model",
+      baseUrl: "http://localhost:11434/v1",
+      api: "openai-completions",
+      reasoning: true
+    });
+  });
+
+  it("returns undefined when resolving a missing selected model", () => {
+    writeFileSync(
+      join(tempDir, "model-config.json"),
+      JSON.stringify({
+        version: 1,
+        defaultModelId: null,
+        entries: []
+      }),
+      "utf8"
+    );
+
+    expect(new ModelConfigFileReader(tempDir).resolveById("missing")).toBeUndefined();
+  });
+
   it("returns undefined when no default model is set", () => {
     writeFileSync(
       join(tempDir, "model-config.json"),

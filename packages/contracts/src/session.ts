@@ -12,9 +12,13 @@ export const PiRuntimeRefSchema = z.object({
 
 export type PiRuntimeRef = z.infer<typeof PiRuntimeRefSchema>;
 
+export const ThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high"]);
+export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
+
 export const SessionPromptCommandPayloadSchema = z.object({
   sessionId: z.string().min(1),
   message: z.string().min(1).max(20_000),
+  thinkingLevel: ThinkingLevelSchema.optional(),
   projectId: z.string().min(1).optional(),
   taskId: z.string().min(1).optional()
 });
@@ -44,6 +48,16 @@ export const AgentMessageDeltaPayloadSchema = z.object({
 });
 
 export type AgentMessageDeltaPayload = z.infer<typeof AgentMessageDeltaPayloadSchema>;
+
+export const AgentThinkingDeltaPayloadSchema = z.object({
+  sessionId: z.string().min(1),
+  runId: z.string().min(1),
+  messageId: z.string().min(1),
+  delta: z.string(),
+  runtime: PiRuntimeRefSchema
+});
+
+export type AgentThinkingDeltaPayload = z.infer<typeof AgentThinkingDeltaPayloadSchema>;
 
 export const AgentMessageCompletedPayloadSchema = z.object({
   sessionId: z.string().min(1),
@@ -85,6 +99,11 @@ export const AgentMessageDeltaEventEnvelopeSchema = EnvelopeBaseSchema.extend({
   payload: AgentMessageDeltaPayloadSchema
 });
 
+export const AgentThinkingDeltaEventEnvelopeSchema = EnvelopeBaseSchema.extend({
+  type: z.literal("agent.thinking_delta"),
+  payload: AgentThinkingDeltaPayloadSchema
+});
+
 export const AgentMessageCompletedEventEnvelopeSchema = EnvelopeBaseSchema.extend({
   type: z.literal("agent.message_completed"),
   payload: AgentMessageCompletedPayloadSchema
@@ -101,6 +120,7 @@ export const AgentErrorEventEnvelopeSchema = EnvelopeBaseSchema.extend({
 });
 
 export type AgentMessageDeltaEventEnvelope = Envelope<AgentMessageDeltaPayload, "agent.message_delta">;
+export type AgentThinkingDeltaEventEnvelope = Envelope<AgentThinkingDeltaPayload, "agent.thinking_delta">;
 export type AgentMessageCompletedEventEnvelope = Envelope<AgentMessageCompletedPayload, "agent.message_completed">;
 export type AgentToolRequestedEventEnvelope = Envelope<AgentToolRequestedPayload, "tool.call_requested">;
 export type AgentErrorEventEnvelope = Envelope<AgentErrorPayload, "agent.error">;

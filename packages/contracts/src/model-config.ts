@@ -88,6 +88,27 @@ export const ModelConfigSetDefaultCommandPayloadSchema = z.object({
 });
 export type ModelConfigSetDefaultCommandPayload = z.infer<typeof ModelConfigSetDefaultCommandPayloadSchema>;
 
+export const ModelConfigTestCommandPayloadSchema = z.object({
+  id: z.string().min(1)
+});
+export type ModelConfigTestCommandPayload = z.infer<typeof ModelConfigTestCommandPayloadSchema>;
+
+export const ModelConfigTestResultPayloadSchema = z.object({
+  id: z.string().min(1),
+  status: z.enum(["ok", "failed"]),
+  checkedAt: z.string().datetime(),
+  latencyMs: z.number().int().nonnegative(),
+  runtime: z
+    .object({
+      provider: z.string().min(1),
+      model: z.string().min(1),
+      mode: z.enum(["local-faux", "provider"])
+    })
+    .optional(),
+  message: z.string().min(1)
+});
+export type ModelConfigTestResultPayload = z.infer<typeof ModelConfigTestResultPayloadSchema>;
+
 export const ModelConfigListCommandEnvelopeSchema = EnvelopeBaseSchema.extend({
   type: z.literal("modelConfig.list"),
   payload: ModelConfigListCommandPayloadSchema
@@ -108,6 +129,11 @@ export const ModelConfigSetDefaultCommandEnvelopeSchema = EnvelopeBaseSchema.ext
   payload: ModelConfigSetDefaultCommandPayloadSchema
 });
 
+export const ModelConfigTestCommandEnvelopeSchema = EnvelopeBaseSchema.extend({
+  type: z.literal("modelConfig.test"),
+  payload: ModelConfigTestCommandPayloadSchema
+});
+
 export type ModelConfigListCommandEnvelope = Envelope<
   ModelConfigListCommandPayload,
   "modelConfig.list"
@@ -123,4 +149,8 @@ export type ModelConfigDeleteCommandEnvelope = Envelope<
 export type ModelConfigSetDefaultCommandEnvelope = Envelope<
   ModelConfigSetDefaultCommandPayload,
   "modelConfig.setDefault"
+>;
+export type ModelConfigTestCommandEnvelope = Envelope<
+  ModelConfigTestCommandPayload,
+  "modelConfig.test"
 >;

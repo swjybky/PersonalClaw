@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AgentMessageCompletedEventEnvelopeSchema,
+  AgentThinkingDeltaEventEnvelopeSchema,
   CommandEnvelopeSchema,
   SessionPromptAcceptedPayloadSchema,
   SystemHealthPayloadSchema,
@@ -49,7 +50,8 @@ describe("IPC envelope contracts", () => {
       "session.prompt",
       {
         sessionId: "session_1",
-        message: "整理今天的个人任务"
+        message: "整理今天的个人任务",
+        thinkingLevel: "medium"
       },
       {
         id: "cmd_session_1",
@@ -60,6 +62,28 @@ describe("IPC envelope contracts", () => {
     );
 
     expect(CommandEnvelopeSchema.parse(envelope).type).toBe("session.prompt");
+  });
+
+  it("accepts agent thinking delta events", () => {
+    const envelope = createEnvelope(
+      "agent.thinking_delta",
+      {
+        sessionId: "session_1",
+        runId: "run_1",
+        messageId: "message_1",
+        delta: "正在分析用户意图。",
+        runtime: {
+          provider: "deepseek",
+          model: "deepseek-v4-pro",
+          mode: "provider"
+        }
+      },
+      {
+        id: "evt_thinking_1"
+      }
+    );
+
+    expect(AgentThinkingDeltaEventEnvelopeSchema.parse(envelope).payload.delta).toContain("分析");
   });
 
   it("validates pi runtime prompt acceptance payloads", () => {

@@ -30,12 +30,13 @@ export const useSystemStore = defineStore("system", {
         this.isLoading = false;
       }
     },
-    subscribe(): void {
+    subscribe(listener?: (event: SystemEventEnvelope) => void): void {
       if (this.unsubscribe) {
         return;
       }
 
       this.unsubscribe = window.personalClaw.events.subscribe((event) => {
+        listener?.(event);
         this.events = [event, ...this.events].slice(0, 12);
 
         if (event.type === "system.health") {

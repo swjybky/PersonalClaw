@@ -2,14 +2,19 @@ import { defineStore } from "pinia";
 import type {
   ModelConfigEntryInput,
   ModelConfigSummary,
-  ModelConfigSummaryListPayload
+  ModelConfigSummaryListPayload,
+  ModelConfigTestResultPayload
 } from "@personal-claw/contracts";
+
+type ModelConfigTestState = Record<string, ModelConfigTestResultPayload | undefined>;
 
 interface ModelConfigState {
   summaries: ModelConfigSummary[];
   defaultModelId: string | null;
   isLoading: boolean;
   isSaving: boolean;
+  testingIds: string[];
+  testResults: ModelConfigTestState;
   error: string | null;
   loadedAt: string | null;
 }
@@ -32,6 +37,8 @@ export const useModelConfigStore = defineStore("modelConfig", {
     defaultModelId: null,
     isLoading: false,
     isSaving: false,
+    testingIds: [],
+    testResults: {},
     error: null,
     loadedAt: null
   }),
@@ -99,6 +106,24 @@ export const useModelConfigStore = defineStore("modelConfig", {
         throw error;
       } finally {
         this.isSaving = false;
+      }
+    },
+    async test(id: string): Promise<ModelConfigTestResultPayload> {
+      this.error = null;
+      this.testingIds = [...new Set([...this.testingIds, id])];
+
+      try {
+        const result = await resolveModelConfigApi().test({ id });
+        this.testResults = {
+          ...this.testResults,
+          [id]: result
+        };
+        return result;
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : "测试模型配置失败。";
+        throw error;
+      } finally {
+        this.testingIds = this.testingIds.filter((item) => item !== id);
       }
     }
   }

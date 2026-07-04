@@ -1,8 +1,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { NConfigProvider, NTag } from "naive-ui";
+import { NConfigProvider, NDropdown, NTag } from "naive-ui";
+import type { DropdownOption } from "naive-ui";
 import type { UiMessage, UiToolCall } from "@personal-claw/chat-ui-adapter";
-import type { PiRuntimeRef, SystemEventEnvelope } from "@personal-claw/contracts";
+import type {
+  PiRuntimeRef,
+  SystemEventEnvelope,
+  TaskDraftPreview,
+  ThinkingLevel
+} from "@personal-claw/contracts";
 import AgentConversation from "./components/AgentConversation.vue";
 import ModelConfig from "./components/ModelConfig.vue";
 import {
@@ -22,7 +28,18 @@ import {
 } from "./navigation";
 import { useSystemStore } from "./stores/system";
 import { useModelConfigStore } from "./stores/modelConfig";
+import { useHistorySectionCollapse, useSidebarCollapse } from "./sidebarPane";
 import { useTaskPaneCollapse } from "./taskPane";
+import {
+  buildTaskProgressItems,
+  summarizeTaskDraft,
+  taskProgressPercent as calculateTaskProgressPercent
+} from "./taskDraftPreview";
+import {
+  defaultThinkingLevelForModel,
+  resolveThinkingLevelForModel,
+  supportsThinkingLevel
+} from "./modelCapabilities";
 
 interface HistoryItem {
   id: string;
@@ -31,16 +48,16 @@ interface HistoryItem {
   isActive: boolean;
 }
 
-interface TaskProgressItem {
-  id: string;
-  label: string;
-  status: "done" | "active" | "pending";
-}
-
 interface DetailRow {
   id: string;
   label: string;
   value: string;
+}
+
+interface ActiveAgentRun {
+  sessionId: string;
+  runId: string;
+  startedAtMs: number;
 }
 
 const system = useSystemStore();
@@ -48,28 +65,26 @@ const modelConfig = useModelConfigStore();
 const activeSessionId = ref(createConversationSessionId());
 const activeNavigationKey = ref<NavigationKey>(defaultNavigationKey);
 const composerDraft = ref("");
+const thinkingLevel = ref<ThinkingLevel>("off");
+const { isSidebarCollapsed, sidebarToggleLabel, toggleSidebar } = useSidebarCollapse();
+const { isHistoryCollapsed, historyToggleLabel, toggleHistory } = useHistorySectionCollapse();
 const { isTaskPaneCollapsed, taskPaneToggleLabel, toggleTaskPane } = useTaskPaneCollapse();
 const assistantMessageByRun = new Map<string, string>();
+const finishedAgentRunKeys = new Set<string>();
+const handledEventIds = new Set<string>();
+const agentRunTimeouts = new Map<string, number>();
 let skipNextHistoryPersist = false;
 const messages = ref<UiMessage[]>(createDefaultConversationMessages());
-
-const toolCalls = ref<UiToolCall[]>([
-  {
-    id: "tool-policy-1",
-    name: "pi-agent-core",
-    status: "completed",
-    summary: "Agent Utility 已接入，工具调用仍等待 Policy Engine"
-  }
-]);
+const activeAgentRuns = ref<ActiveAgentRun[]>([]);
+const toolCalls = ref<UiToolCall[]>([]);
+const latestTaskDraft = ref<TaskDraftPreview | null>(null);
+const latestAgentDiagnostic = ref<string | null>(null);
+const latestThinkingPreview = ref("");
+const lastRunDurationMs = ref<number | null>(null);
+const elapsedNowMs = ref(Date.now());
+let elapsedTimerId: number | undefined;
 
 const historyRecords = ref<ConversationHistoryRecord[]>([]);
-
-const taskProgressItems: readonly TaskProgressItem[] = [
-  { id: "task-intake", label: "任务输入", status: "done" },
-  { id: "task-analysis", label: "需求分析", status: "active" },
-  { id: "task-plan", label: "执行方案", status: "pending" },
-  { id: "task-run", label: "执行验证", status: "pending" }
-];
 
 const projectRows: readonly DetailRow[] = [
   { id: "project-name", label: "项目名称", value: "PersonalClaw" },
@@ -92,18 +107,39 @@ const codeAgentRows: readonly DetailRow[] = [
   { id: "codex", label: "Codex", value: "可配置 CLI Agent" }
 ];
 
+const navigationShortcutByKey: Partial<Record<NavigationKey, string>> = {
+  conversation: "Ctrl+N"
+};
+
 const activeNavigation = computed(() => getNavigationItem(activeNavigationKey.value));
 const isFullBleedView = computed(
   () => activeNavigationKey.value === "conversation" || activeNavigationKey.value === "model-config"
 );
-const actionNavItems = computed(() =>
-  navigationItems.filter((item) => item.key === "conversation" || item.key === "model-config")
-);
-const configNavItems = computed(() =>
-  navigationItems.filter((item) => item.key !== "conversation" && item.key !== "model-config")
-);
 const modelLabel = computed(() => modelConfig.defaultSummary?.label ?? "本地 Faux");
-const modeLabel = computed(() => (modelConfig.hasRealProvider ? "已配置模型" : "本地模式"));
+const modeLabel = computed(() => (modelConfig.hasRealProvider ? "个人任务助手" : "本地模式"));
+const activeModelSupportsThinking = computed(() => supportsThinkingLevel(modelConfig.defaultSummary));
+const effectiveThinkingLevel = computed(() =>
+  resolveThinkingLevelForModel(modelConfig.defaultSummary, thinkingLevel.value)
+);
+const isConversationStreaming = computed(() =>
+  activeAgentRuns.value.some((run) => run.sessionId === activeSessionId.value)
+);
+const activeConversationRun = computed(() =>
+  activeAgentRuns.value.find((run) => run.sessionId === activeSessionId.value)
+);
+const workStatusLabel = computed(() => {
+  const activeRun = activeConversationRun.value;
+
+  if (activeRun) {
+    return `Working for ${formatRunDuration(elapsedNowMs.value - activeRun.startedAtMs)}`;
+  }
+
+  if (lastRunDurationMs.value !== null) {
+    return `Worked for ${formatRunDuration(lastRunDurationMs.value)}`;
+  }
+
+  return "";
+});
 const historyItems = computed<HistoryItem[]>(() =>
   historyRecords.value.map((record) => ({
     id: record.id,
@@ -112,14 +148,15 @@ const historyItems = computed<HistoryItem[]>(() =>
     isActive: record.id === activeSessionId.value
   }))
 );
+const historyActionOptions: DropdownOption[] = [{ label: "删除", key: "delete" }];
 const workerRows = computed(() => system.health?.workers ?? []);
 const overallStatus = computed(() => system.health?.status ?? "starting");
-const taskProgressPercent = computed(() => {
-  const completed = taskProgressItems.filter((item) => item.status === "done").length;
-  const active = taskProgressItems.some((item) => item.status === "active") ? 0.5 : 0;
-
-  return Math.round(((completed + active) / taskProgressItems.length) * 100);
-});
+const isTaskDraftRunning = computed(() => activeConversationRun.value !== undefined && latestTaskDraft.value === null);
+const taskProgressItems = computed(() =>
+  buildTaskProgressItems(latestTaskDraft.value, isTaskDraftRunning.value)
+);
+const latestTaskDraftSummary = computed(() => summarizeTaskDraft(latestTaskDraft.value));
+const taskProgressPercent = computed(() => calculateTaskProgressPercent(taskProgressItems.value));
 
 function statusType(status: string): "success" | "warning" | "error" | "default" {
   if (status === "ok" || status === "ready") {
@@ -150,6 +187,22 @@ function openModelConfig(): void {
   activeNavigationKey.value = "model-config";
 }
 
+function updateThinkingLevel(value: ThinkingLevel): void {
+  thinkingLevel.value = activeModelSupportsThinking.value ? value : "off";
+}
+
+function formatRunDuration(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+
+  return `${seconds}s`;
+}
+
 function removeHistorySession(sessionId: string): void {
   const nextRecords = historyRecords.value.filter((record) => record.id !== sessionId);
 
@@ -161,7 +214,119 @@ function removeHistorySession(sessionId: string): void {
   saveConversationHistory(historyRecords.value);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function redactDiagnosticValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.slice(0, 12).map(redactDiagnosticValue);
+  }
+
+  if (!isRecord(value)) {
+    return value;
+  }
+
+  const redacted: Record<string, unknown> = {};
+
+  for (const [key, item] of Object.entries(value)) {
+    if (/api.?key|authorization|bearer|cookie|password|secret|token/i.test(key)) {
+      redacted[key] = "[redacted]";
+      continue;
+    }
+
+    redacted[key] = redactDiagnosticValue(item);
+  }
+
+  return redacted;
+}
+
+function stringifyDiagnosticDetails(details: unknown): string | undefined {
+  if (details === undefined) {
+    return undefined;
+  }
+
+  if (typeof details === "string") {
+    return details.slice(0, 1200);
+  }
+
+  try {
+    return JSON.stringify(redactDiagnosticValue(details), null, 2).slice(0, 1200);
+  } catch {
+    return String(details).slice(0, 1200);
+  }
+}
+
+function stringifyToolCallSummary(args: unknown): string {
+  const prefix = "已拦截，等待 Policy Engine 审批";
+
+  if (args === undefined) {
+    return prefix;
+  }
+
+  try {
+    const details = JSON.stringify(redactDiagnosticValue(args), null, 2);
+
+    return `${prefix} · 参数 ${details.slice(0, 180)}`;
+  } catch (error: unknown) {
+    return `${prefix} · 参数 ${String(error instanceof Error ? error.message : args).slice(0, 180)}`;
+  }
+}
+
+function formatAgentDiagnostic(event: Extract<SystemEventEnvelope, { type: "agent.error" }>): string {
+  const lines = [
+    `code: ${event.payload.code}`,
+    `message: ${event.payload.message}`
+  ];
+
+  if (event.payload.runtime) {
+    lines.push(`provider: ${event.payload.runtime.provider}`);
+    lines.push(`model: ${event.payload.runtime.model}`);
+    lines.push(`mode: ${event.payload.runtime.mode}`);
+  }
+
+  const details = stringifyDiagnosticDetails(event.payload.details);
+
+  if (details) {
+    lines.push("details:");
+    lines.push(details);
+  }
+
+  return lines.join("\n");
+}
+
+function deleteHistorySession(sessionId: string): void {
+  removeHistorySession(sessionId);
+
+  if (sessionId !== activeSessionId.value) {
+    return;
+  }
+
+  activeSessionId.value = createConversationSessionId();
+  composerDraft.value = "";
+  assistantMessageByRun.clear();
+  toolCalls.value = [];
+  latestTaskDraft.value = null;
+  latestAgentDiagnostic.value = null;
+  latestThinkingPreview.value = "";
+  lastRunDurationMs.value = null;
+  skipNextHistoryPersist = true;
+  messages.value = createDefaultConversationMessages();
+  activeNavigationKey.value = "conversation";
+}
+
+function handleHistoryAction(sessionId: string, actionKey: string | number): void {
+  if (actionKey === "delete") {
+    deleteHistorySession(sessionId);
+    return;
+  }
+
+  throw new Error(`未知历史对话操作：${String(actionKey)}`);
+}
+
 function startNewConversation(): void {
+  collapseTaskPane();
+
   if (!hasUserMessage(messages.value)) {
     removeHistorySession(activeSessionId.value);
   }
@@ -169,26 +334,18 @@ function startNewConversation(): void {
   activeSessionId.value = createConversationSessionId();
   composerDraft.value = "";
   assistantMessageByRun.clear();
+  toolCalls.value = [];
+  latestTaskDraft.value = null;
+  latestAgentDiagnostic.value = null;
+  latestThinkingPreview.value = "";
+  lastRunDurationMs.value = null;
   skipNextHistoryPersist = true;
   messages.value = createDefaultConversationMessages();
   activeNavigationKey.value = "conversation";
 }
 
 function createDefaultConversationMessages(): UiMessage[] {
-  return [
-    {
-      id: "message-system-1",
-      role: "system",
-      content: "个人任务管理智能体已接入 pi-agent-core。当前仍保持桌面端进程边界。",
-      createdAt: new Date("2026-07-03T09:00:00+08:00").toISOString()
-    },
-    {
-      id: "message-assistant-1",
-      role: "assistant",
-      content: "可以直接描述一个任务，我会通过 Agent Utility 把它整理成任务草稿。",
-      createdAt: new Date("2026-07-03T09:01:00+08:00").toISOString()
-    }
-  ];
+  return [];
 }
 
 function initializeConversationHistory(): void {
@@ -238,11 +395,86 @@ function selectHistory(id: string): void {
   activeNavigationKey.value = "conversation";
   composerDraft.value = "";
   assistantMessageByRun.clear();
+  toolCalls.value = [];
+  latestTaskDraft.value = null;
+  latestAgentDiagnostic.value = null;
+  latestThinkingPreview.value = "";
+  lastRunDurationMs.value = null;
   skipNextHistoryPersist = true;
   messages.value = record.messages.map((message) => ({ ...message }));
 }
 
-function ensureAssistantMessage(runId: string, runtime?: PiRuntimeRef): string {
+function agentRunKey(sessionId: string, runId: string): string {
+  return `${sessionId}:${runId}`;
+}
+
+function markRunStreaming(sessionId: string, runId: string): void {
+  const key = agentRunKey(sessionId, runId);
+
+  if (finishedAgentRunKeys.has(key)) {
+    return;
+  }
+
+  if (activeAgentRuns.value.some((run) => run.sessionId === sessionId && run.runId === runId)) {
+    return;
+  }
+
+  activeAgentRuns.value = [...activeAgentRuns.value, { sessionId, runId, startedAtMs: Date.now() }];
+}
+
+function finishRun(sessionId: string, runId: string): void {
+  const key = agentRunKey(sessionId, runId);
+  const timeoutId = agentRunTimeouts.get(key);
+  const activeRun = activeAgentRuns.value.find(
+    (run) => run.sessionId === sessionId && run.runId === runId
+  );
+
+  if (timeoutId !== undefined) {
+    window.clearTimeout(timeoutId);
+    agentRunTimeouts.delete(key);
+  }
+
+  if (activeRun && sessionId === activeSessionId.value) {
+    lastRunDurationMs.value = Math.max(0, Date.now() - activeRun.startedAtMs);
+  }
+
+  finishedAgentRunKeys.add(key);
+  activeAgentRuns.value = activeAgentRuns.value.filter(
+    (run) => run.sessionId !== sessionId || run.runId !== runId
+  );
+}
+
+function watchRunProgress(sessionId: string, runId: string): void {
+  const key = agentRunKey(sessionId, runId);
+
+  if (agentRunTimeouts.has(key)) {
+    return;
+  }
+
+  const timeoutId = window.setTimeout(() => {
+    if (finishedAgentRunKeys.has(key)) {
+      return;
+    }
+
+    finishRun(sessionId, runId);
+
+    if (sessionId !== activeSessionId.value) {
+      return;
+    }
+
+    const messageId = ensureAssistantMessage(runId);
+    latestAgentDiagnostic.value =
+      "code: renderer.agent_event_timeout\nmessage: Agent 已接受请求，但超过 60 秒没有收到模型输出或错误事件。请检查模型配置、API Key、网络，或查看右侧最近事件。";
+    updateAssistantMessage(
+      messageId,
+      latestAgentDiagnostic.value
+    );
+  }, 60_000);
+
+  agentRunTimeouts.set(key, timeoutId);
+}
+
+function ensureAssistantMessage(runId: string): string {
   const existingId = assistantMessageByRun.get(runId);
 
   if (existingId) {
@@ -256,7 +488,7 @@ function ensureAssistantMessage(runId: string, runtime?: PiRuntimeRef): string {
     {
       id,
       role: "assistant",
-      content: runtime?.mode === "provider" ? "" : "正在通过本地 pi faux provider 生成任务草稿...",
+      content: "",
       createdAt: new Date().toISOString()
     }
   ];
@@ -277,14 +509,15 @@ function updateAssistantMessage(messageId: string, nextContent: string): void {
 }
 
 function appendAssistantDelta(messageId: string, delta: string): void {
+  if (!delta) {
+    return;
+  }
+
   messages.value = messages.value.map((message) =>
     message.id === messageId
       ? {
           ...message,
-          content:
-            message.content === "正在通过本地 pi faux provider 生成任务草稿..."
-              ? delta
-              : `${message.content}${delta}`,
+          content: `${message.content}${delta}`,
           createdAt: new Date().toISOString()
         }
       : message
@@ -292,27 +525,61 @@ function appendAssistantDelta(messageId: string, delta: string): void {
 }
 
 function handleAgentEvent(event: SystemEventEnvelope): void {
+  if (handledEventIds.has(event.id)) {
+    return;
+  }
+
+  handledEventIds.add(event.id);
+  if (handledEventIds.size > 200) {
+    const [oldestEventId] = handledEventIds;
+    if (oldestEventId) {
+      handledEventIds.delete(oldestEventId);
+    }
+  }
+
   if (event.type === "agent.message_delta") {
+    markRunStreaming(event.payload.sessionId, event.payload.runId);
+
     if (event.payload.sessionId !== activeSessionId.value) {
       return;
     }
 
-    const messageId = ensureAssistantMessage(event.payload.runId, event.payload.runtime);
+    latestAgentDiagnostic.value = null;
+
+    const messageId = ensureAssistantMessage(event.payload.runId);
     appendAssistantDelta(messageId, event.payload.delta);
     return;
   }
 
-  if (event.type === "agent.message_completed") {
+  if (event.type === "agent.thinking_delta") {
+    markRunStreaming(event.payload.sessionId, event.payload.runId);
+
     if (event.payload.sessionId !== activeSessionId.value) {
       return;
     }
 
-    const messageId = ensureAssistantMessage(event.payload.runId, event.payload.runtime);
-    updateAssistantMessage(messageId, event.payload.content);
+    latestThinkingPreview.value = `${latestThinkingPreview.value}${event.payload.delta}`.slice(-2000);
+    return;
+  }
+
+  if (event.type === "agent.message_completed") {
+    finishRun(event.payload.sessionId, event.payload.runId);
+
+    if (event.payload.sessionId !== activeSessionId.value) {
+      return;
+    }
+
+    latestAgentDiagnostic.value = null;
+    const messageId = ensureAssistantMessage(event.payload.runId);
+    if (event.payload.content.trim()) {
+      updateAssistantMessage(messageId, event.payload.content);
+    }
     return;
   }
 
   if (event.type === "tool.call_requested") {
+    markRunStreaming(event.payload.sessionId, event.payload.runId);
+
     if (event.payload.sessionId !== activeSessionId.value) {
       return;
     }
@@ -322,20 +589,40 @@ function handleAgentEvent(event: SystemEventEnvelope): void {
         id: event.payload.toolCallId,
         name: event.payload.toolName,
         status: "requested" as const,
-        summary: "已拦截，等待 Policy Engine 审批"
+        summary: stringifyToolCallSummary(event.payload.args)
       },
       ...toolCalls.value
     ].slice(0, 6);
     return;
   }
 
-  if (event.type === "agent.error") {
+  if (event.type === "task.draft_created") {
+    finishRun(event.payload.sessionId, event.payload.runId);
+
     if (event.payload.sessionId !== activeSessionId.value) {
       return;
     }
 
-    const messageId = ensureAssistantMessage(event.payload.runId, event.payload.runtime);
-    updateAssistantMessage(messageId, `Agent 运行失败：${event.payload.message}`);
+    latestTaskDraft.value = event.payload.draft;
+    latestAgentDiagnostic.value = null;
+
+    if (isTaskPaneCollapsed.value) {
+      toggleTaskPane();
+    }
+    return;
+  }
+
+  if (event.type === "agent.error") {
+    finishRun(event.payload.sessionId, event.payload.runId);
+
+    if (event.payload.sessionId !== activeSessionId.value) {
+      return;
+    }
+
+    const messageId = ensureAssistantMessage(event.payload.runId);
+    const diagnostic = formatAgentDiagnostic(event);
+    latestAgentDiagnostic.value = diagnostic;
+    updateAssistantMessage(messageId, `Agent 运行失败\n\n${diagnostic}`);
   }
 }
 
@@ -353,20 +640,29 @@ async function sendConversationMessage(content: string): Promise<void> {
     }
   ];
   composerDraft.value = "";
+  latestAgentDiagnostic.value = null;
+  latestTaskDraft.value = null;
+  latestThinkingPreview.value = "";
+  lastRunDurationMs.value = null;
 
   try {
     const accepted = await window.personalClaw.session.prompt({
       sessionId: activeSessionId.value,
-      message: content
+      message: content,
+      thinkingLevel: effectiveThinkingLevel.value
     });
-    ensureAssistantMessage(accepted.runId, accepted.runtime);
+    markRunStreaming(accepted.sessionId, accepted.runId);
+    watchRunProgress(accepted.sessionId, accepted.runId);
+    ensureAssistantMessage(accepted.runId);
   } catch (error) {
+    const diagnostic = error instanceof Error ? error.message : "Agent 命令提交失败。";
+    latestAgentDiagnostic.value = diagnostic;
     messages.value = [
       ...messages.value,
       {
         id: `message-assistant-error-${Date.now()}`,
         role: "assistant",
-        content: error instanceof Error ? error.message : "Agent 命令提交失败。",
+        content: diagnostic,
         createdAt: new Date().toISOString()
       }
     ];
@@ -374,20 +670,14 @@ async function sendConversationMessage(content: string): Promise<void> {
 }
 
 onMounted(() => {
+  elapsedTimerId = window.setInterval(() => {
+    elapsedNowMs.value = Date.now();
+  }, 1000);
   initializeConversationHistory();
-  system.subscribe();
+  system.subscribe(handleAgentEvent);
   void system.refreshHealth();
   void modelConfig.refresh();
 });
-
-watch(
-  () => system.events[0],
-  (event) => {
-    if (event) {
-      handleAgentEvent(event);
-    }
-  }
-);
 
 watch(messages, () => {
   if (skipNextHistoryPersist) {
@@ -398,85 +688,172 @@ watch(messages, () => {
   persistActiveConversation();
 }, { deep: true });
 
+watch(
+  activeModelSupportsThinking,
+  (canUseThinking) => {
+    if (!canUseThinking) {
+      thinkingLevel.value = "off";
+      return;
+    }
+
+    if (thinkingLevel.value === "off") {
+      thinkingLevel.value = defaultThinkingLevelForModel(modelConfig.defaultSummary);
+    }
+  },
+  { immediate: true }
+);
+
 onBeforeUnmount(() => {
+  if (elapsedTimerId !== undefined) {
+    window.clearInterval(elapsedTimerId);
+  }
+  for (const timeoutId of agentRunTimeouts.values()) {
+    window.clearTimeout(timeoutId);
+  }
+  agentRunTimeouts.clear();
   system.teardown();
 });
 </script>
 
 <template>
   <NConfigProvider>
-    <main class="desktop-shell" :class="{ 'is-task-pane-collapsed': isTaskPaneCollapsed }">
-      <aside class="left-rail" aria-label="工作区导航">
-        <div class="brand-row">
-          <img class="brand-mark" src="/icon-128.png" width="28" height="28" alt="PersonalClaw" />
-          <div>
-            <strong>PersonalClaw</strong>
-            <span>个人任务管理</span>
+    <main
+      class="desktop-shell"
+      :class="{
+        'is-sidebar-collapsed': isSidebarCollapsed,
+        'is-task-pane-collapsed': isTaskPaneCollapsed
+      }"
+    >
+      <aside class="left-rail" :class="{ 'is-collapsed': isSidebarCollapsed }" aria-label="工作区导航">
+        <div class="sidebar-chrome">
+          <div class="sidebar-toolbar">
+            <button
+              type="button"
+              class="sidebar-pane-toggle"
+              :class="{ 'is-collapsed': isSidebarCollapsed }"
+              :aria-expanded="!isSidebarCollapsed"
+              aria-controls="sidebar-content"
+              :aria-label="sidebarToggleLabel"
+              :title="sidebarToggleLabel"
+              @click="toggleSidebar"
+            >
+              <span class="task-pane-toggle-icon sidebar-pane-toggle-icon" aria-hidden="true"></span>
+            </button>
           </div>
         </div>
 
-        <div class="action-group" aria-label="主操作">
+        <nav id="sidebar-content" class="sidebar-nav" aria-label="功能入口">
           <button
-            v-for="item in actionNavItems"
+            v-for="item in navigationItems"
             :key="item.key"
             type="button"
-            class="nav-action"
+            class="nav-item sidebar-nav-item"
             :class="{ 'is-active': activeNavigationKey === item.key }"
             :aria-current="activeNavigationKey === item.key ? 'page' : undefined"
             :data-nav-key="item.key"
             @click="selectNavigation(item.key)"
           >
-            <svg
-              v-if="item.key === 'conversation'"
-              viewBox="0 0 24 24"
-              class="nav-action-icon"
-              aria-hidden="true"
-            >
-              <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-            </svg>
-            <svg
-              v-else
-              viewBox="0 0 24 24"
-              class="nav-action-icon"
-              aria-hidden="true"
-            >
-              <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/>
-              <path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-            </svg>
-            <span>{{ item.label }}</span>
-          </button>
-        </div>
-
-        <nav class="primary-nav" aria-label="功能入口">
-          <button
-            v-for="item in configNavItems"
-            :key="item.key"
-            type="button"
-            class="nav-item"
-            :class="{ 'is-active': activeNavigationKey === item.key }"
-            :aria-current="activeNavigationKey === item.key ? 'page' : undefined"
-            :data-nav-key="item.key"
-            @click="selectNavigation(item.key)"
-          >
-            <span class="nav-dot" aria-hidden="true"></span>
-            {{ item.label }}
+            <span class="sidebar-nav-icon" aria-hidden="true">
+              <svg v-if="item.key === 'conversation'" viewBox="0 0 24 24">
+                <path d="M4 6l16-2-6 16-3-7-7-3Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+                <path d="M11 13l4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+              </svg>
+              <svg v-else-if="item.key === 'model-config'" viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.7"/>
+                <path d="M12 3v3M12 18v3M4.2 7.5l2.6 1.5M17.2 15l2.6 1.5M19.8 7.5L17.2 9M6.8 15l-2.6 1.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+              </svg>
+              <svg v-else-if="item.key === 'project-config'" viewBox="0 0 24 24">
+                <path d="M3.5 7.5h6l2 2H20.5v8.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2v-10.5Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+              </svg>
+              <svg v-else-if="item.key === 'task-sources'" viewBox="0 0 24 24">
+                <rect x="5" y="5" width="14" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/>
+                <path d="M9 3v4M15 3v4M8 11h8M8 15h5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+              </svg>
+              <svg v-else viewBox="0 0 24 24">
+                <rect x="4" y="4" width="7" height="7" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.7"/>
+                <rect x="13" y="4" width="7" height="7" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.7"/>
+                <rect x="4" y="13" width="7" height="7" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.7"/>
+                <path d="M16.5 14.5v4M14.5 16.5h4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+              </svg>
+            </span>
+            <span class="sidebar-nav-label">{{ item.label }}</span>
+            <span v-if="navigationShortcutByKey[item.key]" class="sidebar-shortcut">
+              {{ navigationShortcutByKey[item.key] }}
+            </span>
           </button>
         </nav>
 
-        <section class="history-section" aria-label="历史对话">
-          <div class="section-label">历史对话</div>
-          <button
-            v-for="item in historyItems"
-            :key="item.id"
-            type="button"
-            class="history-item"
-            :class="{ 'is-active': item.isActive }"
-            @click="selectHistory(item.id)"
-          >
-            <strong>{{ item.title }}</strong>
-            <span>{{ item.detail }}</span>
-          </button>
+        <section class="history-section" :class="{ 'is-collapsed': isHistoryCollapsed }" aria-label="历史对话">
+          <div class="history-section-header">
+            <span class="section-label">历史对话</span>
+            <button
+              type="button"
+              class="history-collapse-toggle"
+              :class="{ 'is-collapsed': isHistoryCollapsed }"
+              :aria-expanded="!isHistoryCollapsed"
+              aria-controls="history-list"
+              :aria-label="historyToggleLabel"
+              :title="historyToggleLabel"
+              @click="toggleHistory"
+            >
+              <span class="history-collapse-chevron" aria-hidden="true"></span>
+            </button>
+          </div>
+
+          <div v-if="!isHistoryCollapsed" id="history-list" class="history-list">
+            <div
+              v-for="item in historyItems"
+              :key="item.id"
+              class="history-row"
+              :class="{ 'is-active': item.isActive }"
+            >
+              <button
+                type="button"
+                class="history-item"
+                :title="item.detail"
+                @click="selectHistory(item.id)"
+              >
+                <span class="history-dot" aria-hidden="true"></span>
+                <span class="history-title">{{ item.title }}</span>
+              </button>
+              <NDropdown
+                trigger="click"
+                placement="bottom-end"
+                :options="historyActionOptions"
+                @select="(key) => handleHistoryAction(item.id, key)"
+              >
+                <button
+                  type="button"
+                  class="history-action"
+                  :aria-label="`历史对话操作：${item.title}`"
+                  title="更多操作"
+                >
+                  <span aria-hidden="true"></span>
+                </button>
+              </NDropdown>
+            </div>
+            <p v-if="!historyItems.length" class="history-empty">
+              <span class="history-dot is-muted" aria-hidden="true"></span>
+              暂无历史对话
+            </p>
+          </div>
         </section>
+
+        <div class="sidebar-footer">
+          <div class="sidebar-account">
+            <img class="sidebar-account-mark" src="/icon-128.png" width="30" height="30" alt="" />
+            <div class="sidebar-account-copy">
+              <strong>PersonalClaw</strong>
+              <span>{{ modeLabel }}</span>
+            </div>
+            <button type="button" class="sidebar-footer-icon" title="模型配置" aria-label="模型配置" @click="openModelConfig">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.7"/>
+                <path d="M12 3v3M12 18v3M4.2 7.5l2.6 1.5M17.2 15l2.6 1.5M19.8 7.5L17.2 9M6.8 15l-2.6 1.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+              </svg>
+            </button>
+          </div>
+        </div>
       </aside>
 
       <section class="center-pane" :class="{ 'is-full-bleed': isFullBleedView }" aria-label="主工作区">
@@ -492,8 +869,14 @@ onBeforeUnmount(() => {
           v-model:draft="composerDraft"
           :messages="messages"
           :tool-calls="toolCalls"
+          :is-streaming="isConversationStreaming"
           :model-label="modelLabel"
-          :mode-label="modeLabel"
+          :diagnostic-message="latestAgentDiagnostic"
+          :thinking-preview="latestThinkingPreview"
+          :thinking-level="thinkingLevel"
+          :can-use-thinking="activeModelSupportsThinking"
+          :work-status-label="workStatusLabel"
+          @update:thinking-level="updateThinkingLevel"
           @send="sendConversationMessage"
           @open-model-config="openModelConfig"
         />

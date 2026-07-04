@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { ModelProviderSchema, type ModelProvider } from "@personal-claw/contracts";
+import { ModelApiSchema, ModelProviderSchema, type ModelApi, type ModelProvider } from "@personal-claw/contracts";
 import type { PiModelRef, SupportedPiProviderId } from "@personal-claw/pi-runtime-adapter";
 
 interface StoredEntry {
@@ -9,7 +9,7 @@ interface StoredEntry {
   provider: ModelProvider;
   modelId: string;
   baseUrl?: string;
-  api?: string;
+  api?: ModelApi;
   reasoning?: boolean;
   apiKey: string;
 }
@@ -24,6 +24,7 @@ interface ResolvedModelConfig {
   modelRef: PiModelRef;
   provider: SupportedPiProviderId;
   apiKey: string;
+  label: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -40,22 +41,41 @@ function parseEntry(raw: unknown): StoredEntry | undefined {
     return undefined;
   }
 
+  const apiResult = raw.api === undefined ? { success: true, data: undefined } : ModelApiSchema.safeParse(raw.api);
+  if (!apiResult.success) {
+    return undefined;
+  }
+
   const id = typeof raw.id === "string" ? raw.id : undefined;
   const label = typeof raw.label === "string" ? raw.label : undefined;
   const modelId = typeof raw.modelId === "string" ? raw.modelId : undefined;
   const apiKey = typeof raw.apiKey === "string" ? raw.apiKey : undefined;
+  const baseUrl = typeof raw.baseUrl === "string" ? raw.baseUrl : undefined;
+  const reasoning = typeof raw.reasoning === "boolean" ? raw.reasoning : undefined;
 
   if (!id || !label || !modelId || apiKey === undefined) {
     return undefined;
   }
 
-  return {
+  const entry: StoredEntry = {
     id,
     label,
     provider: providerResult.data,
     modelId,
     apiKey
   };
+
+  if (baseUrl) {
+    entry.baseUrl = baseUrl;
+  }
+  if (apiResult.data) {
+    entry.api = apiResult.data;
+  }
+  if (reasoning !== undefined) {
+    entry.reasoning = reasoning;
+  }
+
+  return entry;
 }
 
 function parseConfig(raw: unknown): StoredConfig | undefined {
@@ -95,6 +115,32 @@ export class ModelConfigFileReader {
   }
 
   resolveDefault(): ResolvedModelConfig | undefined {
+    const config = this.readConfig();
+
+    if (!config || !config.defaultModelId) {
+      return undefined;
+    }
+
+    const resolved = this.resolveFromConfig(config, config.defaultModelId);
+
+    if (!resolved || resolved.provider === "faux") {
+      return undefined;
+    }
+
+    return resolved;
+  }
+
+  resolveById(id: string): ResolvedModelConfig | undefined {
+    const config = this.readConfig();
+
+    if (!config) {
+      return undefined;
+    }
+
+    return this.resolveFromConfig(config, id);
+  }
+
+  private readConfig(): StoredConfig | undefined {
     if (!this.filePath) {
       return undefined;
     }
@@ -109,20 +155,27 @@ export class ModelConfigFileReader {
 
     const config = parseConfig(raw);
 
-    if (!config || !config.defaultModelId) {
-      return undefined;
-    }
+    return config;
+  }
 
-    const entry = config.entries.find((item) => item.id === config.defaultModelId);
+  private resolveFromConfig(config: StoredConfig, id: string): ResolvedModelConfig | undefined {
+    const entry = config.entries.find((item) => item.id === id);
 
-    if (!entry || entry.provider === "faux") {
+    if (!entry) {
       return undefined;
     }
 
     return {
-      modelRef: { provider: entry.provider, modelId: entry.modelId },
+      modelRef: {
+        provider: entry.provider,
+        modelId: entry.modelId,
+        ...(entry.baseUrl ? { baseUrl: entry.baseUrl } : {}),
+        ...(entry.api ? { api: entry.api } : {}),
+        ...(entry.reasoning !== undefined ? { reasoning: entry.reasoning } : {})
+      },
       provider: entry.provider,
-      apiKey: entry.apiKey.trim()
+      apiKey: entry.apiKey.trim(),
+      label: entry.label
     };
   }
 }

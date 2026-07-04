@@ -199,6 +199,30 @@ async function removeEntry(summary: ModelConfigSummary): Promise<void> {
   }
 }
 
+function isTesting(summary: ModelConfigSummary): boolean {
+  return store.testingIds.includes(summary.id);
+}
+
+function testResultClass(summary: ModelConfigSummary): string {
+  const result = store.testResults[summary.id];
+
+  if (!result) {
+    return "";
+  }
+
+  return result.status === "ok" ? "is-configured" : "is-missing";
+}
+
+async function testEntry(summary: ModelConfigSummary): Promise<void> {
+  formError.value = null;
+
+  try {
+    await store.test(summary.id);
+  } catch (error) {
+    formError.value = error instanceof Error ? error.message : "测试失败。";
+  }
+}
+
 onMounted(() => {
   void store.refresh();
 });
@@ -277,8 +301,16 @@ onMounted(() => {
             <button type="button" class="model-config-chip" @click="openEdit(summary)">编辑</button>
             <button
               type="button"
+              class="model-config-chip"
+              :disabled="isTesting(summary)"
+              @click="testEntry(summary)"
+            >
+              {{ isTesting(summary) ? "测试中…" : "测试" }}
+            </button>
+            <button
+              type="button"
               class="model-config-chip is-danger"
-              :disabled="store.isSaving"
+              :disabled="store.isSaving || isTesting(summary)"
               @click="removeEntry(summary)"
             >
               删除
@@ -302,6 +334,15 @@ onMounted(() => {
             {{ summary.provider === "faux" ? "本地无需 Key" : summary.hasSecret ? "API Key 已配置" : "API Key 未配置" }}
           </span>
           <small class="model-config-secret-ref">secretRef：{{ summary.secretRef }}</small>
+          <small
+            v-if="store.testResults[summary.id]"
+            class="model-config-test-result"
+            :class="testResultClass(summary)"
+          >
+            测试{{ store.testResults[summary.id]?.status === "ok" ? "通过" : "失败" }}：{{
+              store.testResults[summary.id]?.message
+            }}
+          </small>
         </div>
       </article>
     </section>

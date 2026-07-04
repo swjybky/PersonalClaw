@@ -131,14 +131,17 @@ function toSummary(entry: StoredModelConfigEntry): ModelConfigSummary {
   return ModelConfigSummarySchema.parse(summary);
 }
 
-function normalizeEntryInput(input: ModelConfigEntryInput): StoredModelConfigEntry {
+function normalizeEntryInput(
+  input: ModelConfigEntryInput,
+  existing?: StoredModelConfigEntry
+): StoredModelConfigEntry {
   const parsed = ModelConfigEntryInputSchema.parse(input);
   const entry: StoredModelConfigEntry = {
     id: parsed.id,
     label: parsed.label,
     provider: parsed.provider,
     modelId: parsed.modelId,
-    apiKey: (parsed.apiKey ?? "").trim()
+    apiKey: parsed.apiKey === undefined ? existing?.apiKey ?? "" : parsed.apiKey.trim()
   };
 
   if (parsed.baseUrl) {
@@ -175,7 +178,8 @@ export class ModelConfigStore {
 
   upsert(input: ModelConfigEntryInput): ModelConfigSummaryListPayload {
     const store = this.read();
-    const incoming = normalizeEntryInput(input);
+    const existing = store.entries.find((entry) => entry.id === input.id);
+    const incoming = normalizeEntryInput(input, existing);
     const entries = [incoming, ...store.entries.filter((entry) => entry.id !== incoming.id)];
 
     let defaultModelId = store.defaultModelId;

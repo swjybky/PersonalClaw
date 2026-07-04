@@ -8,8 +8,8 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "smoke": "PERSONAL_CLAW_SMOKE=1 electron-vite preview",
-    "smoke:renderer": "PERSONAL_CLAW_RENDERER_SMOKE=1 electron-vite preview"
+    "smoke": "node scripts/run-preview.mjs smoke",
+    "smoke:renderer": "node scripts/run-preview.mjs renderer-smoke"
   },
   "dependencies": {
     "@personal-claw/application": "workspace:*",

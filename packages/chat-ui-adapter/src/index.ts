@@ -1,5 +1,6 @@
 import type { AgentMessage, MessageEditor, MessageList } from "@earendil-works/pi-web-ui";
 import "@earendil-works/pi-web-ui/app.css";
+import { registerAdapterMessageElements } from "./pi-web-message-elements";
 
 export interface UiMessage {
   id: string;
@@ -72,11 +73,26 @@ export function registerPiWebUiElements(): Promise<void> {
     return Promise.resolve();
   }
 
-  piWebRegistration ??= Promise.all([
+  piWebRegistration ??= Promise.allSettled([
     import("@mariozechner/mini-lit/dist/MarkdownBlock.js"),
-    import("../node_modules/@earendil-works/pi-web-ui/dist/components/MessageList.js"),
-    import("../node_modules/@earendil-works/pi-web-ui/dist/components/MessageEditor.js")
-  ]).then(() => undefined);
+    import("../node_modules/@earendil-works/pi-web-ui/dist/components/MessageEditor.js"),
+    import("../node_modules/@earendil-works/pi-web-ui/dist/components/MessageList.js")
+  ]).then((results) => {
+    const criticalFailures = [
+      { name: "markdown-block", result: results[0] },
+      { name: "message-editor", result: results[1] }
+    ].filter((item) => item.result?.status === "rejected");
+
+    if (criticalFailures.length > 0) {
+      throw new Error(
+        `pi-web-ui 关键组件注册失败：${criticalFailures.map((item) => item.name).join(", ")}`
+      );
+    }
+
+    if (results[2]?.status === "fulfilled") {
+      registerAdapterMessageElements();
+    }
+  });
 
   return piWebRegistration;
 }
@@ -142,7 +158,12 @@ export function configurePiWebMessageEditor(
 }
 
 function canRegisterCustomElements(): boolean {
-  return typeof globalThis === "object" && "customElements" in globalThis;
+  return (
+    typeof globalThis === "object" &&
+    "customElements" in globalThis &&
+    "document" in globalThis &&
+    typeof globalThis.document?.createElement === "function"
+  );
 }
 
 function toTimestamp(value: string): number {

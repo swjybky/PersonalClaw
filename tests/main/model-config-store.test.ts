@@ -76,6 +76,27 @@ describe("main model config store", () => {
     expect(updated.defaultModelId).toBe("kimi");
   });
 
+  it("preserves an existing api key when editing without a replacement key", () => {
+    store.upsert({
+      id: "deepseek-pro",
+      label: "DeepSeek Pro",
+      provider: "deepseek",
+      modelId: "deepseek-v4-pro",
+      apiKey: "sk-existing"
+    });
+
+    const updated = store.upsert({
+      id: "deepseek-pro",
+      label: "DeepSeek Pro Reasoning",
+      provider: "deepseek",
+      modelId: "deepseek-v4-pro",
+      reasoning: true
+    });
+
+    expect(updated.summaries[0]?.hasSecret).toBe(true);
+    expect(updated.summaries[0]?.label).toBe("DeepSeek Pro Reasoning");
+  });
+
   it("switches the default back to the first entry when the default is deleted", () => {
     store.upsert({
       id: "openai-mini",

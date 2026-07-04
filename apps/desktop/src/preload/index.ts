@@ -7,21 +7,29 @@ import {
   SystemHealthPayloadSchema,
   SessionPromptAcceptedPayloadSchema,
   SessionPromptCommandPayloadSchema,
+  TaskDraftAcceptedPayloadSchema,
+  TaskDraftFromDescriptionCommandPayloadSchema,
   ModelConfigSummaryListPayloadSchema,
   ModelConfigDeleteCommandPayloadSchema,
   ModelConfigEntryInputSchema,
   ModelConfigSetDefaultCommandPayloadSchema,
+  ModelConfigTestCommandPayloadSchema,
+  ModelConfigTestResultPayloadSchema,
   createEnvelope,
   type CommandType,
   type ModelConfigDeleteCommandPayload,
   type ModelConfigEntryInput,
   type ModelConfigSetDefaultCommandPayload,
   type ModelConfigSummaryListPayload,
+  type ModelConfigTestCommandPayload,
+  type ModelConfigTestResultPayload,
   type PersonalClawApi,
   type SessionPromptAcceptedPayload,
   type SessionPromptCommandPayload,
   type SystemEventEnvelope,
-  type SystemHealthPayload
+  type SystemHealthPayload,
+  type TaskDraftAcceptedPayload,
+  type TaskDraftFromDescriptionCommandPayload
 } from "@personal-claw/contracts";
 
 function createBrowserId(prefix: string): string {
@@ -63,6 +71,18 @@ const api: PersonalClawApi = {
       );
     }
   },
+  task: {
+    async draftFromDescription(
+      payload: TaskDraftFromDescriptionCommandPayload
+    ): Promise<TaskDraftAcceptedPayload> {
+      return TaskDraftAcceptedPayloadSchema.parse(
+        await invokeCommand<TaskDraftAcceptedPayload>(
+          "task.draftFromDescription",
+          TaskDraftFromDescriptionCommandPayloadSchema.parse(payload)
+        )
+      );
+    }
+  },
   modelConfig: {
     async list(): Promise<ModelConfigSummaryListPayload> {
       return ModelConfigSummaryListPayloadSchema.parse(
@@ -90,6 +110,14 @@ const api: PersonalClawApi = {
         await invokeCommand<ModelConfigSummaryListPayload>(
           "modelConfig.setDefault",
           ModelConfigSetDefaultCommandPayloadSchema.parse(payload)
+        )
+      );
+    },
+    async test(payload: ModelConfigTestCommandPayload): Promise<ModelConfigTestResultPayload> {
+      return ModelConfigTestResultPayloadSchema.parse(
+        await invokeCommand<ModelConfigTestResultPayload>(
+          "modelConfig.test",
+          ModelConfigTestCommandPayloadSchema.parse(payload)
         )
       );
     }
