@@ -8,6 +8,7 @@ import ModelConfig from "./components/ModelConfig.vue";
 import {
   buildConversationHistoryRecord,
   createConversationSessionId,
+  hasUserMessage,
   loadConversationHistory,
   saveConversationHistory,
   upsertConversationHistory,
@@ -149,14 +150,28 @@ function openModelConfig(): void {
   activeNavigationKey.value = "model-config";
 }
 
+function removeHistorySession(sessionId: string): void {
+  const nextRecords = historyRecords.value.filter((record) => record.id !== sessionId);
+
+  if (nextRecords.length === historyRecords.value.length) {
+    return;
+  }
+
+  historyRecords.value = nextRecords;
+  saveConversationHistory(historyRecords.value);
+}
+
 function startNewConversation(): void {
+  if (!hasUserMessage(messages.value)) {
+    removeHistorySession(activeSessionId.value);
+  }
+
   activeSessionId.value = createConversationSessionId();
   composerDraft.value = "";
   assistantMessageByRun.clear();
   skipNextHistoryPersist = true;
   messages.value = createDefaultConversationMessages();
   activeNavigationKey.value = "conversation";
-  persistActiveConversation();
 }
 
 function createDefaultConversationMessages(): UiMessage[] {
@@ -177,7 +192,7 @@ function createDefaultConversationMessages(): UiMessage[] {
 }
 
 function initializeConversationHistory(): void {
-  const loadedRecords = loadConversationHistory();
+  const loadedRecords = loadConversationHistory().filter((record) => hasUserMessage(record.messages));
 
   if (loadedRecords.length > 0) {
     const [latestRecord] = loadedRecords;
@@ -187,16 +202,22 @@ function initializeConversationHistory(): void {
     }
 
     historyRecords.value = loadedRecords;
+    saveConversationHistory(historyRecords.value);
     activeSessionId.value = latestRecord.id;
     skipNextHistoryPersist = true;
     messages.value = latestRecord.messages.map((message) => ({ ...message }));
     return;
   }
 
-  persistActiveConversation();
+  historyRecords.value = [];
+  saveConversationHistory(historyRecords.value);
 }
 
 function persistActiveConversation(): void {
+  if (!hasUserMessage(messages.value)) {
+    return;
+  }
+
   const record = buildConversationHistoryRecord({
     id: activeSessionId.value,
     messages: messages.value

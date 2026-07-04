@@ -1,4 +1,5 @@
 import type { AgentMessage, MessageEditor, MessageList } from "@earendil-works/pi-web-ui";
+import "@earendil-works/pi-web-ui/app.css";
 
 export interface UiMessage {
   id: string;
@@ -74,8 +75,7 @@ export function registerPiWebUiElements(): Promise<void> {
   piWebRegistration ??= Promise.all([
     import("@mariozechner/mini-lit/dist/MarkdownBlock.js"),
     import("../node_modules/@earendil-works/pi-web-ui/dist/components/MessageList.js"),
-    import("../node_modules/@earendil-works/pi-web-ui/dist/components/MessageEditor.js"),
-    import("@earendil-works/pi-web-ui/app.css")
+    import("../node_modules/@earendil-works/pi-web-ui/dist/components/MessageEditor.js")
   ]).then(() => undefined);
 
   return piWebRegistration;

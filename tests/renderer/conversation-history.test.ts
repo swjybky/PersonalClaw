@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildConversationHistoryRecord,
   conversationHistoryStorageKey,
+  hasUserMessage,
   loadConversationHistory,
   saveConversationHistory,
   upsertConversationHistory,
@@ -102,5 +103,29 @@ describe("conversation history storage", () => {
       "conversation-newer",
       "conversation-older"
     ]);
+  });
+
+  it("detects whether a conversation has user input", () => {
+    expect(
+      hasUserMessage([
+        {
+          id: "message-assistant-1",
+          role: "assistant",
+          content: "你好",
+          createdAt: "2026-07-04T13:30:00.000Z"
+        }
+      ])
+    ).toBe(false);
+
+    expect(
+      hasUserMessage([
+        {
+          id: "message-user-1",
+          role: "user",
+          content: "帮我整理任务",
+          createdAt: "2026-07-04T13:30:00.000Z"
+        }
+      ])
+    ).toBe(true);
   });
 });

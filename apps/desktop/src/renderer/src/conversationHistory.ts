@@ -21,6 +21,10 @@ export function createConversationSessionId(now = Date.now()): string {
   return `conversation-${now}`;
 }
 
+export function hasUserMessage(messages: readonly UiMessage[]): boolean {
+  return messages.some((message) => message.role === "user");
+}
+
 export function loadConversationHistory(storage = getBrowserStorage()): ConversationHistoryRecord[] {
   if (!storage) {
     return [];
