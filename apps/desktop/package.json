@@ -36,12 +36,24 @@
     "directories": {
       "output": "release"
     },
+    "icon": "resources/icon.png",
     "files": [
       "out/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": "resources",
+        "filter": ["*.png"]
+      }
+    ],
+    "linux": {
+      "icon": "resources/icon.png"
+    },
     "mac": {
-      "category": "public.app-category.productivity"
+      "category": "public.app-category.productivity",
+      "icon": "resources/icon.png"
     }
   }
 }

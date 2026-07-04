@@ -1,5 +1,6 @@
-import { app, BrowserWindow, ipcMain, shell } from "electron";
+import { app, BrowserWindow, ipcMain, nativeImage, shell } from "electron";
 import { join } from "node:path";
+import { resolveAppIconPath } from "./icon-path";
 import {
   CommandEnvelopeSchema,
   IPC_COMMAND_CHANNEL,
@@ -24,6 +25,11 @@ interface RendererSmokeSummary {
     name: string;
     status: string;
   }>;
+  navigation: {
+    beforeTitle: string | null;
+    afterTitle: string | null;
+    activeKey: string | null;
+  };
 }
 
 function broadcastEvent(event: SystemEventEnvelope): void {
@@ -122,17 +128,50 @@ function isRendererSmokeSummary(value: unknown): value is RendererSmokeSummary {
     return false;
   }
 
-  const candidate = value as { status: unknown; workers: unknown };
-  return typeof candidate.status === "string" && Array.isArray(candidate.workers);
+  const candidate = value as { status: unknown; workers: unknown; navigation?: unknown };
+
+  if (typeof candidate.status !== "string" || !Array.isArray(candidate.workers)) {
+    return false;
+  }
+
+  if (typeof candidate.navigation !== "object" || candidate.navigation === null) {
+    return false;
+  }
+
+  const navigation = candidate.navigation as {
+    beforeTitle?: unknown;
+    afterTitle?: unknown;
+    activeKey?: unknown;
+  };
+
+  const hasNullableString = (item: unknown): item is string | null => typeof item === "string" || item === null;
+
+  return (
+    hasNullableString(navigation.beforeTitle) &&
+    hasNullableString(navigation.afterTitle) &&
+    hasNullableString(navigation.activeKey)
+  );
+}
+
+function validateAppIcon(): void {
+  const iconPath = resolveAppIconPath();
+  const icon = nativeImage.createFromPath(iconPath);
+
+  if (icon.isEmpty()) {
+    logger.warn({ iconPath }, "app icon missing or unreadable");
+  }
 }
 
 async function createMainWindow(options: { showWhenReady?: boolean } = {}): Promise<BrowserWindow> {
+  const iconPath = resolveAppIconPath();
+
   mainWindow = new BrowserWindow({
     width: 1220,
     height: 820,
     minWidth: 960,
     minHeight: 680,
     title: "PersonalClaw",
+    icon: iconPath,
     show: false,
     backgroundColor: "#f7f7f2",
     webPreferences: {
@@ -210,12 +249,34 @@ async function runRendererSmoke(): Promise<void> {
         }
 
         const health = await window.personalClaw.system.health();
+        const beforeTitle = document.querySelector("h1")?.textContent?.trim() ?? null;
+        const projectButton = document.querySelector('[data-nav-key="projects"]');
+
+        if (projectButton instanceof HTMLButtonElement) {
+          projectButton.click();
+        }
+
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+        const afterTitle = document.querySelector("h1")?.textContent?.trim() ?? null;
+        const activeKey = document.querySelector(".nav-item.is-active")?.getAttribute("data-nav-key") ?? null;
+        const navigationUpdated =
+          projectButton instanceof HTMLButtonElement &&
+          beforeTitle !== afterTitle &&
+          afterTitle === "项目" &&
+          activeKey === "projects";
+
         return {
-          status: health.status,
+          status: navigationUpdated ? health.status : "navigation_click_failed",
           workers: health.workers.map((worker) => ({
             name: worker.name,
             status: worker.status
-          }))
+          })),
+          navigation: {
+            beforeTitle,
+            afterTitle,
+            activeKey
+          }
         };
       })()
     `),
@@ -248,6 +309,7 @@ async function shutdownAndExit(exitCode = 0): Promise<void> {
 registerIpcHandlers();
 
 app.whenReady().then(async () => {
+  validateAppIcon();
   supervisor.startAll();
 
   if (process.env.PERSONAL_CLAW_SMOKE === "1") {
