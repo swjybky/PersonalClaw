@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { EnvelopeBaseSchema, type Envelope } from "./envelope";
+import { EnvelopeBaseSchema, EnvelopeContextSchema } from "./envelope";
 import { PiRuntimeRefSchema, ThinkingLevelSchema } from "./session";
 
 export const AutomationLevelSchema = z.enum(["L0", "L1", "L2", "L3", "L4"]);
@@ -9,6 +9,7 @@ export const DraftStepTypeSchema = z.enum([
   "agent",
   "tool",
   "human_input",
+  "approval",
   "verification",
   "notification"
 ]);
@@ -95,17 +96,20 @@ export const TaskDraftCreatedPayloadSchema = z.object({
 
 export type TaskDraftCreatedPayload = z.infer<typeof TaskDraftCreatedPayloadSchema>;
 
-export const TaskDraftFromDescriptionCommandEnvelopeSchema = EnvelopeBaseSchema.extend({
+const CorrelatedTaskDraftEnvelopeBaseSchema = EnvelopeBaseSchema.extend({
+  context: EnvelopeContextSchema.extend({
+    correlationId: z.string().min(1)
+  })
+});
+
+export const TaskDraftFromDescriptionCommandEnvelopeSchema = CorrelatedTaskDraftEnvelopeBaseSchema.extend({
   type: z.literal("task.draftFromDescription"),
   payload: TaskDraftFromDescriptionCommandPayloadSchema
 });
 
-export const TaskDraftCreatedEventEnvelopeSchema = EnvelopeBaseSchema.extend({
+export const TaskDraftCreatedEventEnvelopeSchema = CorrelatedTaskDraftEnvelopeBaseSchema.extend({
   type: z.literal("task.draft_created"),
   payload: TaskDraftCreatedPayloadSchema
 });
 
-export type TaskDraftCreatedEventEnvelope = Envelope<
-  TaskDraftCreatedPayload,
-  "task.draft_created"
->;
+export type TaskDraftCreatedEventEnvelope = z.infer<typeof TaskDraftCreatedEventEnvelopeSchema>;

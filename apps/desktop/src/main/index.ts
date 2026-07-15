@@ -1,4 +1,6 @@
 import { app, BrowserWindow, Menu, ipcMain, nativeImage, shell } from "electron";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveAppIconPath } from "./icon-path";
 import {
@@ -19,11 +21,41 @@ import { createId, createLogger, nowIso } from "@personal-claw/shared";
 import { ModelConfigStore, resolveModelConfigPath } from "./model-config-store";
 import { UtilitySupervisor } from "./supervisor";
 
+const isSmokeRuntime =
+  process.env.PERSONAL_CLAW_SMOKE === "1" ||
+  process.env.PERSONAL_CLAW_RENDERER_SMOKE === "1";
+const smokeUserDataPath = isSmokeRuntime
+  ? process.env.PERSONAL_CLAW_SMOKE_USER_DATA_DIR ??
+    mkdtempSync(join(tmpdir(), "personal-claw-smoke-"))
+  : null;
+if (smokeUserDataPath) {
+  app.setPath("userData", smokeUserDataPath);
+}
+
 const logger = createLogger({ process: "main" });
 const startedAt = nowIso();
 let mainWindow: BrowserWindow | undefined;
 let isQuitting = false;
 let modelConfigStore: ModelConfigStore | undefined;
+
+function removeTemporarySmokeUserData(): void {
+  if (!smokeUserDataPath) {
+    return;
+  }
+
+  try {
+    rmSync(smokeUserDataPath, { recursive: true, force: true });
+  } catch (error: unknown) {
+    logger.warn(
+      { error: serializeError(error), smokeUserDataPath },
+      "failed to remove temporary smoke userData"
+    );
+  }
+}
+
+if (smokeUserDataPath) {
+  process.once("exit", removeTemporarySmokeUserData);
+}
 
 function getModelConfigStore(): ModelConfigStore {
   if (!modelConfigStore) {
@@ -64,6 +96,24 @@ interface RendererSmokeSummary {
     status: string;
     projectCount: number;
     codeAgentCount: number;
+  };
+  phase2TaskFlow: {
+    status: string;
+    draftReviewable: boolean;
+    taskCountUnchangedBeforeConfirmation: boolean;
+    createdWithAnalysisAndPlan: boolean;
+    createdAnalysisVersion: number;
+    createdPlanVersion: number;
+    editedAnalysisVersion: number;
+    editedPlanVersion: number;
+    stateFlow: string[];
+    approvalRequestId: string | null;
+    approvalSnapshotMatched: boolean;
+    queuedStatus: string | null;
+    fiveStageDomCount: number;
+    executionBoundaryVisible: boolean;
+    runEventCount: number;
+    cleanupStatus: string;
   };
 }
 
@@ -265,6 +315,7 @@ function isRendererSmokeSummary(value: unknown): value is RendererSmokeSummary {
     piWebComponents?: unknown;
     conversationRender?: unknown;
     taskCore?: unknown;
+    phase2TaskFlow?: unknown;
   };
 
   if (typeof candidate.status !== "string" || !Array.isArray(candidate.workers)) {
@@ -288,6 +339,10 @@ function isRendererSmokeSummary(value: unknown): value is RendererSmokeSummary {
   }
 
   if (typeof candidate.taskCore !== "object" || candidate.taskCore === null) {
+    return false;
+  }
+
+  if (typeof candidate.phase2TaskFlow !== "object" || candidate.phase2TaskFlow === null) {
     return false;
   }
 
@@ -319,6 +374,24 @@ function isRendererSmokeSummary(value: unknown): value is RendererSmokeSummary {
     projectCount?: unknown;
     codeAgentCount?: unknown;
   };
+  const phase2TaskFlow = candidate.phase2TaskFlow as {
+    status?: unknown;
+    draftReviewable?: unknown;
+    taskCountUnchangedBeforeConfirmation?: unknown;
+    createdWithAnalysisAndPlan?: unknown;
+    createdAnalysisVersion?: unknown;
+    createdPlanVersion?: unknown;
+    editedAnalysisVersion?: unknown;
+    editedPlanVersion?: unknown;
+    stateFlow?: unknown;
+    approvalRequestId?: unknown;
+    approvalSnapshotMatched?: unknown;
+    queuedStatus?: unknown;
+    fiveStageDomCount?: unknown;
+    executionBoundaryVisible?: unknown;
+    runEventCount?: unknown;
+    cleanupStatus?: unknown;
+  };
 
   return (
     hasNullableString(navigation.beforeTitle) &&
@@ -336,7 +409,24 @@ function isRendererSmokeSummary(value: unknown): value is RendererSmokeSummary {
     typeof conversationRender.hasTable === "boolean" &&
     typeof taskCore.status === "string" &&
     typeof taskCore.projectCount === "number" &&
-    typeof taskCore.codeAgentCount === "number"
+    typeof taskCore.codeAgentCount === "number" &&
+    typeof phase2TaskFlow.status === "string" &&
+    typeof phase2TaskFlow.draftReviewable === "boolean" &&
+    typeof phase2TaskFlow.taskCountUnchangedBeforeConfirmation === "boolean" &&
+    typeof phase2TaskFlow.createdWithAnalysisAndPlan === "boolean" &&
+    typeof phase2TaskFlow.createdAnalysisVersion === "number" &&
+    typeof phase2TaskFlow.createdPlanVersion === "number" &&
+    typeof phase2TaskFlow.editedAnalysisVersion === "number" &&
+    typeof phase2TaskFlow.editedPlanVersion === "number" &&
+    Array.isArray(phase2TaskFlow.stateFlow) &&
+    phase2TaskFlow.stateFlow.every((status) => typeof status === "string") &&
+    hasNullableString(phase2TaskFlow.approvalRequestId) &&
+    typeof phase2TaskFlow.approvalSnapshotMatched === "boolean" &&
+    hasNullableString(phase2TaskFlow.queuedStatus) &&
+    typeof phase2TaskFlow.fiveStageDomCount === "number" &&
+    typeof phase2TaskFlow.executionBoundaryVisible === "boolean" &&
+    typeof phase2TaskFlow.runEventCount === "number" &&
+    typeof phase2TaskFlow.cleanupStatus === "string"
   );
 }
 
@@ -355,13 +445,13 @@ async function createMainWindow(options: { showWhenReady?: boolean } = {}): Prom
   mainWindow = new BrowserWindow({
     width: 1220,
     height: 820,
-    minWidth: 960,
-    minHeight: 680,
+    minWidth: 1080,
+    minHeight: 720,
     title: "PersonalClaw",
     icon: iconPath,
     autoHideMenuBar: true,
     show: false,
-    backgroundColor: "#f7f7f2",
+    backgroundColor: "#f6f7f8",
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
       contextIsolation: true,
@@ -574,6 +664,328 @@ async function runRendererSmoke(): Promise<void> {
           hasStrong: false,
           hasTable: false
         };
+        const phase2TaskFlow = {
+          status: "not_started",
+          draftReviewable: false,
+          taskCountUnchangedBeforeConfirmation: false,
+          createdWithAnalysisAndPlan: false,
+          createdAnalysisVersion: 0,
+          createdPlanVersion: 0,
+          editedAnalysisVersion: 0,
+          editedPlanVersion: 0,
+          stateFlow: [],
+          approvalRequestId: null,
+          approvalSnapshotMatched: false,
+          queuedStatus: null,
+          fiveStageDomCount: 0,
+          executionBoundaryVisible: false,
+          runEventCount: 0,
+          cleanupStatus: "not_needed"
+        };
+        let phase2SmokeTaskId = null;
+
+        try {
+          const projectList = await window.personalClaw.project.list();
+          const projectId = projectList.activeProjectId ?? projectList.projects[0]?.id;
+
+          if (!projectId) {
+            throw new Error("phase2_smoke_missing_project");
+          }
+
+          const suffix = Date.now().toString(36);
+          const smokeTaskTitle = "Phase 2A renderer smoke " + suffix;
+          const draftSessionId = "phase2-renderer-smoke-" + suffix;
+          const beforeDraft = await window.personalClaw.task.list({ projectId });
+          const draftEventPromise = new Promise((resolve, reject) => {
+            let settled = false;
+            let unsubscribe = () => undefined;
+            const timeoutId = setTimeout(() => {
+              if (!settled) {
+                settled = true;
+                unsubscribe();
+                reject(new Error("phase2_task_draft_timeout"));
+              }
+            }, 6000);
+
+            unsubscribe = window.personalClaw.events.subscribe((event) => {
+              if (
+                !settled &&
+                event.type === "task.draft_created" &&
+                event.payload.sessionId === draftSessionId
+              ) {
+                settled = true;
+                clearTimeout(timeoutId);
+                unsubscribe();
+                resolve(event.payload);
+              }
+            });
+          });
+          const draftAccepted = await window.personalClaw.task.draftFromDescription({
+            description:
+              "为 PersonalClaw 整理一个只生成分析和 DAG 方案、不执行任何外部工具的 Phase 2A 冒烟任务。",
+            sessionId: draftSessionId,
+            projectId
+          });
+          const draftCreated = await draftEventPromise;
+          const draft = draftCreated.draft;
+          const afterDraft = await window.personalClaw.task.list({ projectId });
+          const beforeDraftTaskIds = beforeDraft.tasks.map((task) => task.id).sort();
+          const afterDraftTaskIds = afterDraft.tasks.map((task) => task.id).sort();
+
+          phase2TaskFlow.draftReviewable =
+            draftAccepted.runId === draftCreated.runId &&
+            draftAccepted.draftId === draft.draftId &&
+            draft.status === "draft" &&
+            draft.title.length > 0 &&
+            draft.steps.length > 0;
+          phase2TaskFlow.taskCountUnchangedBeforeConfirmation =
+            JSON.stringify(beforeDraftTaskIds) === JSON.stringify(afterDraftTaskIds);
+
+          const orderedDraftSteps = [...draft.steps].sort(
+            (left, right) => left.sequence - right.sequence
+          );
+          const stepKeyByDraftId = new Map(
+            orderedDraftSteps.map((step) => [step.id, "step_" + step.sequence])
+          );
+          const planSteps = orderedDraftSteps.map((step) => ({
+            key: stepKeyByDraftId.get(step.id),
+            title: step.title,
+            goal: step.goal,
+            type: step.type,
+            dependsOn: step.dependsOn.map((dependency) => {
+              const dependencyKey = stepKeyByDraftId.get(dependency);
+
+              if (!dependencyKey) {
+                throw new Error("phase2_task_draft_unknown_dependency");
+              }
+
+              return dependencyKey;
+            }),
+            successCriteria: step.successCriteria,
+            status: "pending"
+          }));
+          const completionDefinition = [
+            ...new Set(orderedDraftSteps.flatMap((step) => step.successCriteria))
+          ];
+          const analysis = {
+            objective: draft.objective,
+            knownInformation: [...new Set(draft.assumptions)],
+            missingInformation: [...new Set(draft.missingInformation)],
+            constraints: [...new Set(draft.constraints)],
+            risks: [...new Set(orderedDraftSteps.flatMap((step) => step.expectedSideEffects))],
+            expectedArtifacts: [...new Set(draft.expectedArtifacts)],
+            completionDefinition:
+              completionDefinition.length > 0
+                ? completionDefinition
+                : ["完成：" + draft.objective],
+            suggestedAutomationLevel: draft.suggestedAutomationLevel
+          };
+          const createdTask = await window.personalClaw.task.create({
+            projectId,
+            title: smokeTaskTitle,
+            goal: draft.objective,
+            source: {
+              kind: "conversation",
+              label: "Electron renderer smoke",
+              referenceId: draft.draftId
+            },
+            priority: "normal",
+            analysis,
+            planSummary: "Phase 2A smoke 初始方案",
+            steps: planSteps,
+            codeAgentId: null
+          });
+          phase2SmokeTaskId = createdTask.id;
+
+          let taskView = await window.personalClaw.task.get({ id: createdTask.id });
+          phase2TaskFlow.stateFlow.push(taskView.task.status);
+          phase2TaskFlow.createdAnalysisVersion = taskView.analysis?.version ?? 0;
+          phase2TaskFlow.createdPlanVersion = taskView.plan?.version ?? 0;
+          phase2TaskFlow.createdWithAnalysisAndPlan =
+            taskView.task.source.referenceId === draft.draftId &&
+            taskView.analysis?.version === 1 &&
+            taskView.plan?.version === 1 &&
+            taskView.plan.steps.length === planSteps.length;
+
+          const editedAnalysis = await window.personalClaw.task.saveAnalysis({
+            taskId: createdTask.id,
+            expectedTaskVersion: taskView.task.version,
+            analysis: {
+              ...analysis,
+              knownInformation: [...analysis.knownInformation, "草稿已由用户确认后才持久化"],
+              completionDefinition: [
+                ...analysis.completionDefinition,
+                "任务进入 queued 后仍不产生 Run 或启动执行器"
+              ]
+            }
+          });
+          phase2TaskFlow.editedAnalysisVersion = editedAnalysis.version;
+          taskView = await window.personalClaw.task.get({ id: createdTask.id });
+
+          const editedPlan = await window.personalClaw.task.savePlan({
+            taskId: createdTask.id,
+            expectedTaskVersion: taskView.task.version,
+            summary: "Phase 2A smoke 审批前方案 v2",
+            steps: planSteps
+          });
+          phase2TaskFlow.editedPlanVersion = editedPlan.version;
+          taskView = await window.personalClaw.task.get({ id: createdTask.id });
+
+          await window.personalClaw.task.setStatus({ id: createdTask.id, status: "analyzing" });
+          taskView = await window.personalClaw.task.get({ id: createdTask.id });
+          phase2TaskFlow.stateFlow.push(taskView.task.status);
+          await window.personalClaw.task.setStatus({ id: createdTask.id, status: "design_ready" });
+          taskView = await window.personalClaw.task.get({ id: createdTask.id });
+          phase2TaskFlow.stateFlow.push(taskView.task.status);
+
+          const approvalPlan = await window.personalClaw.task.requestPlanApproval({
+            taskId: createdTask.id,
+            planId: taskView.plan.id,
+            expectedTaskVersion: taskView.task.version
+          });
+          taskView = await window.personalClaw.task.get({ id: createdTask.id });
+          phase2TaskFlow.stateFlow.push(taskView.task.status);
+          const approvalSnapshot = approvalPlan.approvalSnapshot;
+          phase2TaskFlow.approvalRequestId = approvalSnapshot?.requestId ?? null;
+          phase2TaskFlow.approvalSnapshotMatched =
+            approvalSnapshot !== null &&
+            approvalSnapshot.taskVersion === taskView.task.version &&
+            approvalSnapshot.analysisVersion === editedAnalysis.version &&
+            approvalSnapshot.codeAgentId === null;
+
+          if (!approvalSnapshot) {
+            throw new Error("phase2_smoke_missing_approval_snapshot");
+          }
+
+          await window.personalClaw.task.approvePlan({
+            taskId: createdTask.id,
+            planId: approvalPlan.id,
+            approvalRequestId: approvalSnapshot.requestId,
+            expectedTaskVersion: taskView.task.version
+          });
+          const queuedView = await window.personalClaw.task.get({ id: createdTask.id });
+          phase2TaskFlow.stateFlow.push(queuedView.task.status);
+          phase2TaskFlow.queuedStatus = queuedView.task.status;
+          phase2TaskFlow.runEventCount = queuedView.recentEvents.filter((event) =>
+            event.eventType.startsWith("run.")
+          ).length;
+
+          const taskCenterButton = document.querySelector('[data-nav-key="task-center"]');
+          if (!(taskCenterButton instanceof HTMLButtonElement)) {
+            throw new Error("phase2_smoke_missing_task_center_navigation");
+          }
+          taskCenterButton.click();
+
+          const smokeTaskButton = await waitFor(
+            () =>
+              Array.from(document.querySelectorAll(".task-center-list-item")).find((item) =>
+                (item.textContent ?? "").includes(smokeTaskTitle)
+              ) ?? null,
+            6000
+          );
+          if (!(smokeTaskButton instanceof HTMLButtonElement)) {
+            throw new Error("phase2_smoke_task_not_rendered");
+          }
+          smokeTaskButton.click();
+          const smokeTaskSelected = await waitFor(
+            () =>
+              document.querySelector(".task-center-detail-header h1")?.textContent?.trim() ===
+                smokeTaskTitle,
+            6000
+          );
+          if (!smokeTaskSelected) {
+            throw new Error("phase2_smoke_task_detail_not_selected");
+          }
+          await new Promise((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(resolve))
+          );
+
+          const stageIds = [
+            "task-stage-goal",
+            "task-stage-analysis",
+            "task-stage-plan",
+            "task-stage-execution",
+            "task-stage-result"
+          ];
+          phase2TaskFlow.fiveStageDomCount = stageIds.filter((id) =>
+            document.getElementById(id)
+          ).length;
+          const executionSection = document
+            .getElementById("task-stage-execution")
+            ?.closest(".task-stage-card");
+          phase2TaskFlow.executionBoundaryVisible =
+            (executionSection?.textContent ?? "").includes("不会启动真实 codeAgent") &&
+            !("run" in queuedView);
+
+          phase2TaskFlow.status =
+            phase2TaskFlow.draftReviewable &&
+            phase2TaskFlow.taskCountUnchangedBeforeConfirmation &&
+            phase2TaskFlow.createdWithAnalysisAndPlan &&
+            phase2TaskFlow.createdAnalysisVersion === 1 &&
+            phase2TaskFlow.createdPlanVersion === 1 &&
+            phase2TaskFlow.editedAnalysisVersion === 2 &&
+            phase2TaskFlow.editedPlanVersion === 2 &&
+            JSON.stringify(phase2TaskFlow.stateFlow) ===
+              JSON.stringify([
+                "draft",
+                "analyzing",
+                "design_ready",
+                "awaiting_approval",
+                "queued"
+              ]) &&
+            phase2TaskFlow.approvalRequestId !== null &&
+            phase2TaskFlow.approvalSnapshotMatched &&
+            phase2TaskFlow.queuedStatus === "queued" &&
+            phase2TaskFlow.fiveStageDomCount === 5 &&
+            phase2TaskFlow.executionBoundaryVisible &&
+            phase2TaskFlow.runEventCount === 0
+              ? "ok"
+              : "phase2_task_flow_failed";
+        } catch (error) {
+          phase2TaskFlow.status =
+            error instanceof Error ? error.message : "phase2_task_flow_failed";
+        } finally {
+          if (phase2SmokeTaskId) {
+            try {
+              let cleanupView = await window.personalClaw.task.get({ id: phase2SmokeTaskId });
+              if (cleanupView.task.status === "awaiting_approval" && cleanupView.analysis) {
+                await window.personalClaw.task.saveAnalysis({
+                  taskId: phase2SmokeTaskId,
+                  expectedTaskVersion: cleanupView.task.version,
+                  analysis: {
+                    objective: cleanupView.analysis.objective,
+                    knownInformation: cleanupView.analysis.knownInformation,
+                    missingInformation: cleanupView.analysis.missingInformation,
+                    constraints: cleanupView.analysis.constraints,
+                    risks: cleanupView.analysis.risks,
+                    expectedArtifacts: cleanupView.analysis.expectedArtifacts,
+                    completionDefinition: cleanupView.analysis.completionDefinition,
+                    suggestedAutomationLevel: cleanupView.analysis.suggestedAutomationLevel
+                  }
+                });
+                cleanupView = await window.personalClaw.task.get({ id: phase2SmokeTaskId });
+              }
+              if (cleanupView.availableTransitions.includes("cancelled")) {
+                await window.personalClaw.task.setStatus({
+                  id: phase2SmokeTaskId,
+                  status: "cancelled",
+                  reason: "Electron renderer smoke cleanup"
+                });
+                cleanupView = await window.personalClaw.task.get({ id: phase2SmokeTaskId });
+              }
+              if (!cleanupView.availableTransitions.includes("archived")) {
+                throw new Error(
+                  "phase2_smoke_cleanup_not_archivable_" + cleanupView.task.status
+                );
+              }
+              const archivedTask = await window.personalClaw.task.delete({ id: phase2SmokeTaskId });
+              phase2TaskFlow.cleanupStatus = archivedTask.status;
+            } catch (error) {
+              phase2TaskFlow.cleanupStatus =
+                error instanceof Error ? error.message : "phase2_smoke_cleanup_failed";
+            }
+          }
+        }
         const beforeTitle = document.querySelector("h1")?.textContent?.trim() ?? null;
         const projectButton = document.querySelector('[data-nav-key="project-config"]');
 
@@ -605,9 +1017,11 @@ async function runRendererSmoke(): Promise<void> {
             conversationRender.hasTable &&
             taskCore.status === "ok" &&
             taskCore.projectCount > 0 &&
-            taskCore.codeAgentCount > 0
+            taskCore.codeAgentCount > 0 &&
+            phase2TaskFlow.status === "ok" &&
+            phase2TaskFlow.cleanupStatus === "archived"
               ? health.status
-              : "navigation_agent_or_pi_web_failed",
+              : "renderer_smoke_failed",
           workers: health.workers.map((worker) => ({
             name: worker.name,
             status: worker.status
@@ -620,12 +1034,13 @@ async function runRendererSmoke(): Promise<void> {
           agent,
           piWebComponents,
           conversationRender,
-          taskCore
+          taskCore,
+          phase2TaskFlow
         };
       })()
     `),
     new Promise<never>((_resolve, reject) => {
-      setTimeout(() => reject(new Error("Renderer smoke timed out.")), 8000);
+      setTimeout(() => reject(new Error("Renderer smoke timed out.")), 25000);
     })
   ]);
 
@@ -647,6 +1062,10 @@ async function shutdownAndExit(exitCode = 0): Promise<void> {
 
   isQuitting = true;
   await supervisor.shutdownAll();
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.destroy();
+  }
+  removeTemporarySmokeUserData();
   app.exit(exitCode);
 }
 

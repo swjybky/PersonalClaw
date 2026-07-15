@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { NConfigProvider, NDropdown, NTag } from "naive-ui";
+import { NConfigProvider, NDropdown } from "naive-ui";
 import type { DropdownOption } from "naive-ui";
 import type { UiMessage, UiToolCall } from "@personal-claw/chat-ui-adapter";
 import type {
   CodeAgentProfile,
+  PlanStepInput,
   ProjectSummary,
   SystemEventEnvelope,
+  TaskAnalysisInput,
+  TaskCreateCommandPayload,
   TaskDraftPreview,
   TaskPriority,
-  TaskStatusDto,
   TaskStatusView,
   TaskSummary,
   ThinkingLevel
@@ -17,6 +19,8 @@ import type {
 import AgentConversation from "./components/AgentConversation.vue";
 import ModelConfig from "./components/ModelConfig.vue";
 import ProjectConfig from "./components/ProjectConfig.vue";
+import TaskCenter from "./components/TaskCenter.vue";
+import TaskDraftReview from "./components/TaskDraftReview.vue";
 import {
   buildConversationHistoryRecord,
   createConversationSessionId,
@@ -41,7 +45,7 @@ import {
   resolveThinkingLevelForModel,
   supportsThinkingLevel
 } from "./modelCapabilities";
-import { pickTaskId, summarizeTaskBoard, taskStatusLabel } from "./taskBoard";
+import { pickTaskId, taskStatusLabel, type TaskFlowAction } from "./taskBoard";
 
 interface HistoryItem {
   id: string;
@@ -80,6 +84,12 @@ const assistantMessageByRun = new Map<string, string>();
 const finishedAgentRunKeys = new Set<string>();
 const handledEventIds = new Set<string>();
 const agentRunTimeouts = new Map<string, number>();
+type BufferedTaskDraftTerminalEvent =
+  | Extract<SystemEventEnvelope, { type: "task.draft_created" }>
+  | Extract<SystemEventEnvelope, { type: "agent.error" }>;
+const bufferedTaskDraftTerminalEvents = new Map<string, BufferedTaskDraftTerminalEvent>();
+let selectedTaskViewRequestToken = 0;
+let taskListRequestToken = 0;
 let skipNextHistoryPersist = false;
 const messages = ref<UiMessage[]>(createDefaultConversationMessages());
 const activeAgentRuns = ref<ActiveAgentRun[]>([]);
@@ -97,34 +107,20 @@ const selectedTaskView = ref<TaskStatusView | null>(null);
 const codeAgents = ref<CodeAgentProfile[]>([]);
 const taskCoreError = ref<string | null>(null);
 const isTaskCoreLoading = ref(false);
+const isTaskMutationSaving = ref(false);
+const isTaskDraftSaving = ref(false);
+const isTaskDraftRunning = ref(false);
+const pendingTaskDraftRunId = ref<string | null>(null);
 const isCreateTaskDialogOpen = ref(false);
-const taskTab = ref<"all" | "todo" | "done" | "blocked">("all");
 const newTaskTitle = ref("");
 const newTaskGoal = ref("");
 const newTaskProjectId = ref("");
 const newTaskPriority = ref<TaskPriority>("normal");
 const newTaskCodeAgentId = ref("");
-const selectedStatusDraft = ref<TaskStatusDto>("draft");
-const selectedProgressDraft = ref(0);
-const selectedCodeAgentDraft = ref("");
 const activeSettingsSectionId = ref<SettingsSection["id"]>("system-prompt");
 const systemPromptDraft = ref(
   "你是 PersonalClaw，一个本地优先、可审批、可恢复、可审计的个人任务智能体。你需要把用户目标拆解为可验证的任务、方案和执行步骤，并在涉及工具、文件、密钥或外部系统时遵守项目权限与人工审批边界。"
 );
-
-const taskStatusOptions: readonly TaskStatusDto[] = [
-  "draft",
-  "analyzing",
-  "design_ready",
-  "queued",
-  "running",
-  "paused",
-  "blocked",
-  "verifying",
-  "succeeded",
-  "failed",
-  "cancelled"
-];
 
 const taskPriorityOptions: readonly TaskPriority[] = ["low", "normal", "high", "urgent"];
 
@@ -158,6 +154,7 @@ const activeNavigation = computed(() => getNavigationItem(activeNavigationKey.va
 const isFullBleedView = computed(
   () =>
     activeNavigationKey.value === "conversation" ||
+    activeNavigationKey.value === "task-center" ||
     activeNavigationKey.value === "model-config" ||
     activeNavigationKey.value === "project-config" ||
     activeNavigationKey.value === "settings"
@@ -183,68 +180,15 @@ const historyActionOptions: DropdownOption[] = [{ label: "删除", key: "delete"
 const selectedTask = computed(() =>
   taskList.value.find((task) => task.id === selectedTaskId.value) ?? null
 );
-const taskBoardCounts = computed(() => summarizeTaskBoard(taskList.value));
 const projectNameById = computed(() =>
   new Map(projects.value.map((project) => [project.id, project.name] as const))
-);
-const filteredTaskList = computed(() => {
-  switch (taskTab.value) {
-    case "todo":
-      return taskList.value.filter((task) =>
-        ["draft", "analyzing", "design_ready", "queued", "running", "paused", "verifying"].includes(task.status)
-      );
-    case "done":
-      return taskList.value.filter((task) => task.status === "succeeded");
-    case "blocked":
-      return taskList.value.filter((task) => task.status === "blocked" || task.status === "failed");
-    case "all":
-      return taskList.value;
-  }
-});
-const selectedTaskCodeAgent = computed(() =>
-  selectedTask.value?.codeAgentId
-    ? codeAgents.value.find((profile) => profile.id === selectedTask.value?.codeAgentId) ?? null
-    : null
 );
 const codeAgentOptions = computed(() =>
   codeAgents.value.filter((profile) => profile.enabled && profile.archivedAt === null)
 );
 
-function taskTagType(status: TaskStatusDto): "success" | "warning" | "error" | "default" | "info" {
-  if (status === "succeeded") {
-    return "success";
-  }
-
-  if (status === "blocked" || status === "failed" || status === "cancelled") {
-    return "error";
-  }
-
-  if (status === "running" || status === "verifying" || status === "queued") {
-    return "warning";
-  }
-
-  if (status === "design_ready") {
-    return "info";
-  }
-
-  return "default";
-}
-
 function formatTaskCoreError(error: unknown): string {
   return error instanceof Error ? error.message : "任务系统操作失败。";
-}
-
-function syncSelectedTaskDrafts(task: TaskSummary | null): void {
-  if (!task) {
-    selectedStatusDraft.value = "draft";
-    selectedProgressDraft.value = 0;
-    selectedCodeAgentDraft.value = "";
-    return;
-  }
-
-  selectedStatusDraft.value = task.status;
-  selectedProgressDraft.value = task.progressPercent;
-  selectedCodeAgentDraft.value = task.codeAgentId ?? "";
 }
 
 async function refreshProjects(): Promise<void> {
@@ -267,20 +211,28 @@ async function refreshCodeAgents(): Promise<void> {
 
 async function refreshSelectedTask(): Promise<void> {
   const taskId = selectedTaskId.value;
+  const requestToken = ++selectedTaskViewRequestToken;
 
   if (!taskId) {
     selectedTaskView.value = null;
-    syncSelectedTaskDrafts(null);
     return;
   }
 
+  if (selectedTaskView.value?.task.id !== taskId) {
+    selectedTaskView.value = null;
+  }
+
   const view = await window.personalClaw.task.get({ id: taskId });
+  if (requestToken !== selectedTaskViewRequestToken || selectedTaskId.value !== taskId) {
+    return;
+  }
   selectedTaskView.value = view;
-  syncSelectedTaskDrafts(view.task);
 }
 
 async function refreshTasks(): Promise<void> {
+  const requestToken = ++taskListRequestToken;
   if (!projects.value.length) {
+    selectedTaskViewRequestToken += 1;
     taskList.value = [];
     selectedTaskId.value = null;
     selectedTaskView.value = null;
@@ -290,6 +242,9 @@ async function refreshTasks(): Promise<void> {
   const taskPayloads = await Promise.all(
     projects.value.map((project) => window.personalClaw.task.list({ projectId: project.id }))
   );
+  if (requestToken !== taskListRequestToken) {
+    return;
+  }
   const tasks = taskPayloads
     .flatMap((payload) => payload.tasks)
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -351,7 +306,7 @@ async function createTaskFromPane(): Promise<void> {
       goal,
       source: {
         kind: "manual",
-        label: "测试新建任务"
+        label: "手动创建"
       },
       priority: newTaskPriority.value,
       codeAgentId: newTaskCodeAgentId.value || null
@@ -362,92 +317,217 @@ async function createTaskFromPane(): Promise<void> {
     closeCreateTaskDialog();
     selectedTaskId.value = task.id;
     await refreshTasks();
+    activeNavigationKey.value = "task-center";
+  } catch (error: unknown) {
+    taskCoreError.value = formatTaskCoreError(error);
+  }
+}
 
-    if (isTaskPaneCollapsed.value) {
-      toggleTaskPane();
+async function runTaskMutation(action: () => Promise<unknown>): Promise<void> {
+  taskCoreError.value = null;
+  isTaskMutationSaving.value = true;
+
+  try {
+    await action();
+    await refreshTasks();
+  } catch (error: unknown) {
+    taskCoreError.value = formatTaskCoreError(error);
+  } finally {
+    isTaskMutationSaving.value = false;
+  }
+}
+
+async function deleteSelectedTask(taskId = selectedTask.value?.id): Promise<void> {
+  if (
+    !taskId ||
+    selectedTaskId.value !== taskId ||
+    selectedTaskView.value?.task.id !== taskId
+  ) {
+    return;
+  }
+
+  await runTaskMutation(() => window.personalClaw.task.delete({ id: taskId }));
+}
+
+async function saveTaskAnalysis(payload: { taskId: string; analysis: TaskAnalysisInput }): Promise<void> {
+  const currentView = selectedTaskView.value;
+  const expectedTaskVersion =
+    selectedTaskId.value === payload.taskId && currentView?.task.id === payload.taskId
+      ? currentView.task.version
+      : undefined;
+
+  if (!expectedTaskVersion) {
+    taskCoreError.value = "无法确认任务版本，请刷新任务详情后重试。";
+    return;
+  }
+
+  await runTaskMutation(() =>
+    window.personalClaw.task.saveAnalysis({
+      ...payload,
+      expectedTaskVersion
+    })
+  );
+}
+
+async function saveTaskPlan(payload: {
+  taskId: string;
+  summary: string;
+  steps: PlanStepInput[];
+}): Promise<void> {
+  const currentView = selectedTaskView.value;
+  const expectedTaskVersion =
+    selectedTaskId.value === payload.taskId && currentView?.task.id === payload.taskId
+      ? currentView.task.version
+      : undefined;
+
+  if (!expectedTaskVersion) {
+    taskCoreError.value = "无法确认任务版本，请刷新任务详情后重试。";
+    return;
+  }
+
+  await runTaskMutation(() =>
+    window.personalClaw.task.savePlan({
+      ...payload,
+      expectedTaskVersion
+    })
+  );
+}
+
+async function handleTaskFlowAction(action: TaskFlowAction): Promise<void> {
+  const currentView = selectedTaskView.value;
+  const taskId = currentView?.task.id;
+
+  if (
+    !taskId ||
+    selectedTaskId.value !== taskId ||
+    action.disabledReason ||
+    action.kind === "phase4_wait"
+  ) {
+    return;
+  }
+
+  if (action.kind === "set_status") {
+    await runTaskMutation(() =>
+      window.personalClaw.task.setStatus({ id: taskId, status: action.status })
+    );
+    return;
+  }
+
+  if (!action.planId) {
+    taskCoreError.value = "当前任务没有可操作的方案版本。";
+    return;
+  }
+
+  const expectedTaskVersion = currentView.task.version;
+  if (!expectedTaskVersion) {
+    taskCoreError.value = "无法确认任务版本，请刷新任务详情后重试。";
+    return;
+  }
+
+  if (action.kind === "approve_plan") {
+    const approvalRequestId = currentView.plan?.approvalSnapshot?.requestId;
+
+    if (!approvalRequestId) {
+      taskCoreError.value = "当前方案缺少有效的审批请求，请重新提交审批。";
+      return;
     }
-  } catch (error: unknown) {
-    taskCoreError.value = formatTaskCoreError(error);
+
+    await runTaskMutation(() =>
+      window.personalClaw.task.approvePlan({
+        taskId,
+        planId: action.planId!,
+        approvalRequestId,
+        expectedTaskVersion
+      })
+    );
+    return;
   }
+
+  await runTaskMutation(() =>
+    window.personalClaw.task.requestPlanApproval({
+      taskId,
+      planId: action.planId!,
+      expectedTaskVersion
+    })
+  );
 }
 
-async function deleteSelectedTask(): Promise<void> {
-  const task = selectedTask.value;
+async function assignTaskCodeAgent(payload: {
+  taskId: string;
+  codeAgentId: string | null;
+}): Promise<void> {
+  if (
+    selectedTaskId.value !== payload.taskId ||
+    selectedTaskView.value?.task.id !== payload.taskId
+  ) {
+    taskCoreError.value = "任务选择已变化，请重新选择后再保存执行器。";
+    return;
+  }
+  await runTaskMutation(() =>
+    window.personalClaw.task.assignCodeAgent({ id: payload.taskId, codeAgentId: payload.codeAgentId })
+  );
+}
 
-  if (!task) {
+async function organizeConversationAsTask(description: string): Promise<void> {
+  const normalized = description.trim();
+  const requestSessionId = activeSessionId.value;
+
+  if (!normalized || isConversationStreaming.value || isTaskDraftRunning.value) {
     return;
   }
 
   taskCoreError.value = null;
+  latestTaskDraft.value = null;
+  isTaskDraftRunning.value = true;
 
-  try {
-    await window.personalClaw.task.delete({ id: task.id });
-    await refreshTasks();
-  } catch (error: unknown) {
-    taskCoreError.value = formatTaskCoreError(error);
-  }
-}
-
-async function updateSelectedTaskStatus(): Promise<void> {
-  const task = selectedTask.value;
-
-  if (!task || task.status === selectedStatusDraft.value) {
-    return;
+  if (isTaskPaneCollapsed.value) {
+    toggleTaskPane();
   }
 
-  taskCoreError.value = null;
-
   try {
-    await window.personalClaw.task.setStatus({
-      id: task.id,
-      status: selectedStatusDraft.value
+    const accepted = await window.personalClaw.task.draftFromDescription({
+      description: normalized,
+      sessionId: requestSessionId,
+      ...(selectedProjectId.value ? { projectId: selectedProjectId.value } : {}),
+      thinkingLevel: effectiveThinkingLevel.value,
+      loop: { maxIterations: 4 }
     });
-    await refreshTasks();
+
+    if (!isTaskDraftRunning.value || activeSessionId.value !== requestSessionId) {
+      return;
+    }
+
+    pendingTaskDraftRunId.value = accepted.runId;
+    composerDraft.value = "";
+    const bufferedTerminalEvent = bufferedTaskDraftTerminalEvents.get(accepted.runId);
+    if (bufferedTerminalEvent) {
+      bufferedTaskDraftTerminalEvents.delete(accepted.runId);
+      applyTaskDraftTerminalEvent(bufferedTerminalEvent);
+      return;
+    }
+    markRunStreaming(accepted.sessionId, accepted.runId);
+    watchRunProgress(accepted.sessionId, accepted.runId);
   } catch (error: unknown) {
+    isTaskDraftRunning.value = false;
+    pendingTaskDraftRunId.value = null;
     taskCoreError.value = formatTaskCoreError(error);
-    syncSelectedTaskDrafts(task);
   }
 }
 
-async function updateSelectedTaskProgress(): Promise<void> {
-  const task = selectedTask.value;
-
-  if (!task) {
-    return;
-  }
-
+async function confirmTaskDraft(payload: TaskCreateCommandPayload): Promise<void> {
+  isTaskDraftSaving.value = true;
   taskCoreError.value = null;
 
   try {
-    await window.personalClaw.task.updateProgress({
-      id: task.id,
-      progressPercent: selectedProgressDraft.value
-    });
+    const task = await window.personalClaw.task.create(payload);
+    selectedTaskId.value = task.id;
+    latestTaskDraft.value = null;
     await refreshTasks();
+    activeNavigationKey.value = "task-center";
   } catch (error: unknown) {
     taskCoreError.value = formatTaskCoreError(error);
-    syncSelectedTaskDrafts(task);
-  }
-}
-
-async function assignSelectedTaskCodeAgent(): Promise<void> {
-  const task = selectedTask.value;
-
-  if (!task) {
-    return;
-  }
-
-  taskCoreError.value = null;
-
-  try {
-    await window.personalClaw.task.assignCodeAgent({
-      id: task.id,
-      codeAgentId: selectedCodeAgentDraft.value || null
-    });
-    await refreshTasks();
-  } catch (error: unknown) {
-    taskCoreError.value = formatTaskCoreError(error);
-    syncSelectedTaskDrafts(task);
+  } finally {
+    isTaskDraftSaving.value = false;
   }
 }
 
@@ -458,6 +538,16 @@ function selectNavigation(key: NavigationKey): void {
   }
 
   activeNavigationKey.value = key;
+}
+
+function selectTask(taskId: string): void {
+  if (selectedTaskId.value === taskId) {
+    return;
+  }
+
+  selectedTaskViewRequestToken += 1;
+  selectedTaskView.value = null;
+  selectedTaskId.value = taskId;
 }
 
 function openModelConfig(): void {
@@ -580,6 +670,8 @@ function deleteHistorySession(sessionId: string): void {
   assistantMessageByRun.clear();
   toolCalls.value = [];
   latestTaskDraft.value = null;
+  isTaskDraftRunning.value = false;
+  pendingTaskDraftRunId.value = null;
   latestAgentDiagnostic.value = null;
   skipNextHistoryPersist = true;
   messages.value = createDefaultConversationMessages();
@@ -637,6 +729,8 @@ function startNewConversation(): void {
   assistantMessageByRun.clear();
   toolCalls.value = [];
   latestTaskDraft.value = null;
+  isTaskDraftRunning.value = false;
+  pendingTaskDraftRunId.value = null;
   latestAgentDiagnostic.value = null;
   skipNextHistoryPersist = true;
   messages.value = createDefaultConversationMessages();
@@ -683,6 +777,8 @@ function selectHistory(id: string): void {
   assistantMessageByRun.clear();
   toolCalls.value = [];
   latestTaskDraft.value = null;
+  isTaskDraftRunning.value = false;
+  pendingTaskDraftRunId.value = null;
   latestAgentDiagnostic.value = null;
   skipNextHistoryPersist = true;
   messages.value = record.messages.map((message) => ({ ...message }));
@@ -734,6 +830,13 @@ function watchRunProgress(sessionId: string, runId: string): void {
     }
 
     finishRun(sessionId, runId);
+
+    if (runId === pendingTaskDraftRunId.value) {
+      isTaskDraftRunning.value = false;
+      pendingTaskDraftRunId.value = null;
+      taskCoreError.value = "任务草稿整理超时，请检查模型配置后重试。";
+      return;
+    }
 
     if (sessionId !== activeSessionId.value) {
       return;
@@ -829,6 +932,52 @@ function appendThinkingDelta(messageId: string, delta: string): void {
   );
 }
 
+function isCurrentTaskDraftRuntimeEvent(sessionId: string, runId: string): boolean {
+  return (
+    isTaskDraftRunning.value &&
+    sessionId === activeSessionId.value &&
+    pendingTaskDraftRunId.value === runId
+  );
+}
+
+function isTaskDraftAcceptancePending(sessionId: string): boolean {
+  return (
+    isTaskDraftRunning.value &&
+    sessionId === activeSessionId.value &&
+    pendingTaskDraftRunId.value === null
+  );
+}
+
+function bufferTaskDraftTerminalEvent(event: BufferedTaskDraftTerminalEvent): void {
+  bufferedTaskDraftTerminalEvents.set(event.payload.runId, event);
+  if (bufferedTaskDraftTerminalEvents.size > 8) {
+    const [oldestRunId] = bufferedTaskDraftTerminalEvents.keys();
+    if (oldestRunId) {
+      bufferedTaskDraftTerminalEvents.delete(oldestRunId);
+    }
+  }
+}
+
+function applyTaskDraftTerminalEvent(event: BufferedTaskDraftTerminalEvent): void {
+  if (!isCurrentTaskDraftRuntimeEvent(event.payload.sessionId, event.payload.runId)) {
+    return;
+  }
+
+  isTaskDraftRunning.value = false;
+  pendingTaskDraftRunId.value = null;
+
+  if (event.type === "task.draft_created") {
+    latestTaskDraft.value = event.payload.draft;
+    latestAgentDiagnostic.value = null;
+    if (isTaskPaneCollapsed.value) {
+      toggleTaskPane();
+    }
+    return;
+  }
+
+  taskCoreError.value = formatAgentDiagnostic(event);
+}
+
 function handleAgentEvent(event: SystemEventEnvelope): void {
   if (handledEventIds.has(event.id)) {
     return;
@@ -857,13 +1006,25 @@ function handleAgentEvent(event: SystemEventEnvelope): void {
     event.type === "task.updated" ||
     event.type === "task.status_changed" ||
     event.type === "task.progress_changed" ||
-    event.type === "task.archived"
+    event.type === "task.archived" ||
+    event.type === "task.analysis_saved" ||
+    event.type === "plan.version_created" ||
+    event.type === "plan.approval_requested" ||
+    event.type === "plan.approved" ||
+    event.type === "plan.rejected"
   ) {
     void refreshTasks();
     return;
   }
 
   if (event.type === "agent.message_delta") {
+    if (
+      isCurrentTaskDraftRuntimeEvent(event.payload.sessionId, event.payload.runId) ||
+      isTaskDraftAcceptancePending(event.payload.sessionId)
+    ) {
+      return;
+    }
+
     markRunStreaming(event.payload.sessionId, event.payload.runId);
 
     if (event.payload.sessionId !== activeSessionId.value) {
@@ -878,6 +1039,13 @@ function handleAgentEvent(event: SystemEventEnvelope): void {
   }
 
   if (event.type === "agent.thinking_delta") {
+    if (
+      isCurrentTaskDraftRuntimeEvent(event.payload.sessionId, event.payload.runId) ||
+      isTaskDraftAcceptancePending(event.payload.sessionId)
+    ) {
+      return;
+    }
+
     markRunStreaming(event.payload.sessionId, event.payload.runId);
 
     if (event.payload.sessionId !== activeSessionId.value) {
@@ -892,6 +1060,15 @@ function handleAgentEvent(event: SystemEventEnvelope): void {
   }
 
   if (event.type === "agent.message_completed") {
+    const isTaskDraftMessage =
+      isCurrentTaskDraftRuntimeEvent(event.payload.sessionId, event.payload.runId) ||
+      isTaskDraftAcceptancePending(event.payload.sessionId);
+    if (isTaskDraftMessage) {
+      // A planning model completion is only an intermediate signal. Keep the
+      // watchdog alive until task.draft_created or agent.error is received.
+      return;
+    }
+
     finishRun(event.payload.sessionId, event.payload.runId);
 
     if (event.payload.sessionId !== activeSessionId.value) {
@@ -910,6 +1087,17 @@ function handleAgentEvent(event: SystemEventEnvelope): void {
   }
 
   if (event.type === "tool.call_requested") {
+    if (isTaskDraftAcceptancePending(event.payload.sessionId)) {
+      return;
+    }
+
+    if (isCurrentTaskDraftRuntimeEvent(event.payload.sessionId, event.payload.runId)) {
+      taskCoreError.value = "规划草稿运行不应请求工具；本次草稿已停止展示。";
+      isTaskDraftRunning.value = false;
+      pendingTaskDraftRunId.value = null;
+      return;
+    }
+
     markRunStreaming(event.payload.sessionId, event.payload.runId);
 
     if (event.payload.sessionId !== activeSessionId.value) {
@@ -930,22 +1118,34 @@ function handleAgentEvent(event: SystemEventEnvelope): void {
 
   if (event.type === "task.draft_created") {
     finishRun(event.payload.sessionId, event.payload.runId);
-
-    if (event.payload.sessionId !== activeSessionId.value) {
+    if (
+      isTaskDraftRunning.value &&
+      event.payload.sessionId === activeSessionId.value &&
+      pendingTaskDraftRunId.value === null
+    ) {
+      bufferTaskDraftTerminalEvent(event);
       return;
     }
-
-    latestTaskDraft.value = event.payload.draft;
-    latestAgentDiagnostic.value = null;
-
-    if (isTaskPaneCollapsed.value) {
-      toggleTaskPane();
-    }
+    applyTaskDraftTerminalEvent(event);
     return;
   }
 
   if (event.type === "agent.error") {
     finishRun(event.payload.sessionId, event.payload.runId);
+
+    if (
+      isTaskDraftRunning.value &&
+      event.payload.sessionId === activeSessionId.value &&
+      pendingTaskDraftRunId.value === null
+    ) {
+      bufferTaskDraftTerminalEvent(event);
+      return;
+    }
+
+    if (isCurrentTaskDraftRuntimeEvent(event.payload.sessionId, event.payload.runId)) {
+      applyTaskDraftTerminalEvent(event);
+      return;
+    }
 
     if (event.payload.sessionId !== activeSessionId.value) {
       return;
@@ -973,7 +1173,6 @@ async function sendConversationMessage(content: string): Promise<void> {
   ];
   composerDraft.value = "";
   latestAgentDiagnostic.value = null;
-  latestTaskDraft.value = null;
 
   try {
     const accepted = await window.personalClaw.session.prompt({
@@ -1065,7 +1264,8 @@ onBeforeUnmount(() => {
       :class="{
         'is-sidebar-collapsed': isSidebarCollapsed,
         'is-task-pane-collapsed': isTaskPaneCollapsed,
-        'is-settings-active': activeNavigationKey === 'settings'
+        'is-settings-active': activeNavigationKey === 'settings',
+        'is-task-center-active': activeNavigationKey === 'task-center'
       }"
     >
       <aside class="left-rail" :class="{ 'is-collapsed': isSidebarCollapsed }" aria-label="工作区导航">
@@ -1101,6 +1301,10 @@ onBeforeUnmount(() => {
               <svg v-if="item.key === 'conversation'" viewBox="0 0 24 24">
                 <path d="M4 6l16-2-6 16-3-7-7-3Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
                 <path d="M11 13l4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+              </svg>
+              <svg v-else-if="item.key === 'task-center'" viewBox="0 0 24 24">
+                <rect x="4" y="4" width="16" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/>
+                <path d="M8 9h8M8 13h5M8 17h7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
               </svg>
               <svg v-else-if="item.key === 'model-config'" viewBox="0 0 24 24">
                 <circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.7"/>
@@ -1244,7 +1448,27 @@ onBeforeUnmount(() => {
           :can-use-thinking="activeModelSupportsThinking"
           @update:thinking-level="updateThinkingLevel"
           @send="sendConversationMessage"
+          @organize-task="organizeConversationAsTask"
           @open-model-config="openModelConfig"
+        />
+
+        <TaskCenter
+          v-else-if="activeNavigationKey === 'task-center'"
+          :tasks="taskList"
+          :selected-task-id="selectedTaskId"
+          :view="selectedTaskView"
+          :projects="projects"
+          :code-agents="codeAgents"
+          :loading="isTaskCoreLoading"
+          :saving="isTaskMutationSaving"
+          :error="taskCoreError"
+          @create="openCreateTaskDialog"
+          @select-task="selectTask"
+          @save-analysis="saveTaskAnalysis"
+          @save-plan="saveTaskPlan"
+          @flow-action="handleTaskFlowAction"
+          @assign-code-agent="assignTaskCodeAgent"
+          @delete-task="deleteSelectedTask"
         />
 
         <ModelConfig v-else-if="activeNavigationKey === 'model-config'" />
@@ -1348,132 +1572,38 @@ onBeforeUnmount(() => {
         </button>
 
         <div v-if="!isTaskPaneCollapsed" id="task-information-content" class="right-pane-content">
-          <section class="task-panel task-panel-primary">
-            <div class="task-panel-title-row">
-              <h2>任务</h2>
-              <button type="button" class="task-primary-button" @click="openCreateTaskDialog">
-                新建任务
-              </button>
-            </div>
+          <TaskDraftReview
+            v-if="latestTaskDraft"
+            :draft="latestTaskDraft"
+            :projects="projects"
+            :selected-project-id="selectedProjectId"
+            :session-id="activeSessionId"
+            :saving="isTaskDraftSaving"
+            :error="taskCoreError"
+            @confirm="confirmTaskDraft"
+            @dismiss="latestTaskDraft = null"
+          />
 
-            <div class="task-tab-list" role="tablist" aria-label="任务筛选">
-              <button type="button" :class="{ 'is-active': taskTab === 'all' }" @click="taskTab = 'all'">
-                全部 {{ taskBoardCounts.total }}
-              </button>
-              <button type="button" :class="{ 'is-active': taskTab === 'todo' }" @click="taskTab = 'todo'">
-                待处理 {{ taskBoardCounts.active }}
-              </button>
-              <button type="button" :class="{ 'is-active': taskTab === 'done' }" @click="taskTab = 'done'">
-                完成 {{ taskBoardCounts.done }}
-              </button>
-              <button type="button" :class="{ 'is-active': taskTab === 'blocked' }" @click="taskTab = 'blocked'">
-                阻塞 {{ taskBoardCounts.blocked }}
-              </button>
-            </div>
-
-            <div v-if="filteredTaskList.length" class="task-list">
-              <button
-                v-for="task in filteredTaskList"
-                :key="task.id"
-                type="button"
-                class="task-row-button"
-                :class="{ 'is-active': task.id === selectedTaskId }"
-                @click="selectedTaskId = task.id"
-              >
-                <span>
-                  <strong>{{ task.title }}</strong>
-                  <small>{{ projectNameById.get(task.projectId) ?? "未知项目" }} · {{ task.source.kind }} · {{ task.priority }}</small>
-                </span>
-                <NTag :type="taskTagType(task.status)" size="small">{{ taskStatusLabel(task.status) }}</NTag>
-              </button>
-            </div>
-            <p v-else-if="isTaskCoreLoading" class="empty">正在加载任务系统。</p>
-            <p v-else class="empty">暂无任务。</p>
-            <p v-if="taskCoreError" class="error-line">{{ taskCoreError }}</p>
+          <section v-else-if="isTaskDraftRunning" class="task-panel task-draft-loading">
+            <p class="eyebrow">Planning only · zero tools</p>
+            <h2>正在整理任务草稿</h2>
+            <p>Agent 已异步接受请求。完成后会在这里显示结构化分析和 DAG 方案，期间不会写入 Core。</p>
           </section>
 
-          <section v-if="selectedTask" class="task-panel">
-            <div class="task-heading">
-              <span>任务状态</span>
-              <NTag :type="taskTagType(selectedTask.status)" size="small">
-                {{ taskStatusLabel(selectedTask.status) }}
-              </NTag>
-            </div>
-            <h2>{{ selectedTask.title }}</h2>
-            <p class="task-goal">{{ selectedTask.goal }}</p>
-
-            <div class="progress-block">
-              <div>
-                <span>完成进度</span>
-                <strong>{{ selectedTask.progressPercent }}%</strong>
-              </div>
-              <div class="progress-track" aria-hidden="true">
-                <span :style="{ width: `${selectedTask.progressPercent}%` }"></span>
-              </div>
-            </div>
-
-            <div class="task-action-grid">
-              <label>
-                <span>状态</span>
-                <select v-model="selectedStatusDraft">
-                  <option v-for="status in taskStatusOptions" :key="status" :value="status">
-                    {{ taskStatusLabel(status) }}
-                  </option>
-                </select>
-              </label>
-              <button type="button" @click="updateSelectedTaskStatus">更新状态</button>
-            </div>
-
-            <div class="task-action-grid">
-              <label>
-                <span>进度</span>
-                <input v-model.number="selectedProgressDraft" type="range" min="0" max="100" />
-              </label>
-              <button type="button" @click="updateSelectedTaskProgress">保存进度</button>
-            </div>
-
-            <div class="task-action-grid">
-              <label>
-                <span>执行器</span>
-                <select v-model="selectedCodeAgentDraft">
-                  <option value="">未分配</option>
-                  <option v-for="profile in codeAgentOptions" :key="profile.id" :value="profile.id">
-                    {{ profile.label }}
-                  </option>
-                </select>
-              </label>
-              <button type="button" @click="assignSelectedTaskCodeAgent">分配</button>
-            </div>
-
-            <dl class="task-meta">
-              <div>
-                <dt>项目</dt>
-                <dd>{{ projectNameById.get(selectedTask.projectId) ?? "未知项目" }}</dd>
-              </div>
-              <div>
-                <dt>执行器</dt>
-                <dd>{{ selectedTaskCodeAgent?.label ?? "未分配" }}</dd>
-              </div>
-              <div>
-                <dt>下一步</dt>
-                <dd>{{ selectedTask.nextStep ?? "待补充" }}</dd>
-              </div>
-              <div>
-                <dt>更新</dt>
-                <dd>{{ new Date(selectedTask.updatedAt).toLocaleString() }}</dd>
-              </div>
+          <section v-else class="task-panel task-panel-primary task-center-shortcut">
+            <p class="eyebrow">Structured Tasks</p>
+            <h2>任务中心</h2>
+            <p>任务已迁移到独立五段式页面。右侧仅保留对话生成的草稿审阅。</p>
+            <dl v-if="selectedTask" class="task-meta">
+              <div><dt>当前任务</dt><dd>{{ selectedTask.title }}</dd></div>
+              <div><dt>状态</dt><dd>{{ taskStatusLabel(selectedTask.status) }}</dd></div>
+              <div><dt>项目</dt><dd>{{ projectNameById.get(selectedTask.projectId) ?? "未知项目" }}</dd></div>
             </dl>
-
-            <ol v-if="selectedTaskView?.recentEvents.length" class="event-list task-event-list">
-              <li v-for="event in selectedTaskView.recentEvents.slice(0, 4)" :key="event.id">
-                <time>#{{ event.sequence }}</time>
-                <span>{{ event.eventType }}</span>
-              </li>
-            </ol>
-
-            <button type="button" class="task-danger-button" @click="deleteSelectedTask">
-              删除任务
-            </button>
+            <div class="task-center-shortcut-actions">
+              <button type="button" class="task-primary-button" @click="activeNavigationKey = 'task-center'">打开任务中心</button>
+              <button type="button" @click="openCreateTaskDialog">新建任务</button>
+            </div>
+            <p v-if="taskCoreError" class="error-line">{{ taskCoreError }}</p>
           </section>
         </div>
       </aside>
@@ -1487,7 +1617,7 @@ onBeforeUnmount(() => {
         <section class="task-dialog" role="dialog" aria-modal="true" aria-label="新建任务">
           <div class="task-dialog-header">
             <div>
-              <p class="eyebrow">测试入口</p>
+              <p class="eyebrow">Manual Task</p>
               <h2>新建任务</h2>
             </div>
             <button type="button" class="task-dialog-close" aria-label="关闭" @click="closeCreateTaskDialog">
@@ -1530,7 +1660,7 @@ onBeforeUnmount(() => {
                 </select>
               </label>
             </div>
-            <p class="task-dialog-note">当前入口仅用于测试，后续任务会由智能体和任务来源创建。</p>
+            <p class="task-dialog-note">手动创建会先生成草稿任务；可在任务中心继续补充分析和方案。</p>
             <div class="task-dialog-actions">
               <button type="button" @click="closeCreateTaskDialog">取消</button>
               <button type="submit" :disabled="!newTaskProjectId || !newTaskTitle.trim() || !newTaskGoal.trim()">

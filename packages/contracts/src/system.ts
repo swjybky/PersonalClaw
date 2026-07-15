@@ -30,12 +30,18 @@ import {
   CodeAgentListCommandEnvelopeSchema,
   CodeAgentUpdatedEventEnvelopeSchema,
   CodeAgentUpsertCommandEnvelopeSchema,
+  PlanApprovalRequestedEventEnvelopeSchema,
+  PlanApprovedEventEnvelopeSchema,
+  PlanRejectedEventEnvelopeSchema,
+  PlanVersionCreatedEventEnvelopeSchema,
   ProjectArchiveCommandEnvelopeSchema,
   ProjectCreateCommandEnvelopeSchema,
   ProjectCreatedEventEnvelopeSchema,
   ProjectListCommandEnvelopeSchema,
   ProjectUpdateCommandEnvelopeSchema,
   TaskArchivedEventEnvelopeSchema,
+  TaskAnalysisSavedEventEnvelopeSchema,
+  TaskApprovePlanCommandEnvelopeSchema,
   TaskAssignCodeAgentCommandEnvelopeSchema,
   TaskCreateCommandEnvelopeSchema,
   TaskCreatedEventEnvelopeSchema,
@@ -43,14 +49,22 @@ import {
   TaskGetCommandEnvelopeSchema,
   TaskListCommandEnvelopeSchema,
   TaskProgressChangedEventEnvelopeSchema,
+  TaskRequestPlanApprovalCommandEnvelopeSchema,
+  TaskSaveAnalysisCommandEnvelopeSchema,
+  TaskSavePlanCommandEnvelopeSchema,
   TaskSetStatusCommandEnvelopeSchema,
   TaskStatusChangedEventEnvelopeSchema,
   TaskUpdateCommandEnvelopeSchema,
   TaskUpdateProgressCommandEnvelopeSchema,
   TaskUpdatedEventEnvelopeSchema,
   type CodeAgentUpdatedEventEnvelope,
+  type PlanApprovalRequestedEventEnvelope,
+  type PlanApprovedEventEnvelope,
+  type PlanRejectedEventEnvelope,
+  type PlanVersionCreatedEventEnvelope,
   type ProjectCreatedEventEnvelope,
   type TaskArchivedEventEnvelope,
+  type TaskAnalysisSavedEventEnvelope,
   type TaskCreatedEventEnvelope,
   type TaskProgressChangedEventEnvelope,
   type TaskStatusChangedEventEnvelope,
@@ -119,6 +133,10 @@ export const CommandEnvelopeSchema = z.discriminatedUnion("type", [
   TaskSetStatusCommandEnvelopeSchema,
   TaskUpdateProgressCommandEnvelopeSchema,
   TaskAssignCodeAgentCommandEnvelopeSchema,
+  TaskSaveAnalysisCommandEnvelopeSchema,
+  TaskSavePlanCommandEnvelopeSchema,
+  TaskRequestPlanApprovalCommandEnvelopeSchema,
+  TaskApprovePlanCommandEnvelopeSchema,
   CodeAgentListCommandEnvelopeSchema,
   CodeAgentUpsertCommandEnvelopeSchema,
   CodeAgentDeleteCommandEnvelopeSchema,
@@ -190,6 +208,11 @@ export const SystemEventEnvelopeSchema = z.discriminatedUnion("type", [
   TaskStatusChangedEventEnvelopeSchema,
   TaskProgressChangedEventEnvelopeSchema,
   TaskArchivedEventEnvelopeSchema,
+  TaskAnalysisSavedEventEnvelopeSchema,
+  PlanVersionCreatedEventEnvelopeSchema,
+  PlanApprovalRequestedEventEnvelopeSchema,
+  PlanApprovedEventEnvelopeSchema,
+  PlanRejectedEventEnvelopeSchema,
   CodeAgentUpdatedEventEnvelopeSchema
 ]);
 
@@ -217,4 +240,9 @@ export type SystemEventEnvelope =
   | TaskStatusChangedEventEnvelope
   | TaskProgressChangedEventEnvelope
   | TaskArchivedEventEnvelope
+  | TaskAnalysisSavedEventEnvelope
+  | PlanVersionCreatedEventEnvelope
+  | PlanApprovalRequestedEventEnvelope
+  | PlanApprovedEventEnvelope
+  | PlanRejectedEventEnvelope
   | CodeAgentUpdatedEventEnvelope;

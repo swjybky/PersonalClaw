@@ -19,11 +19,17 @@ import {
   ProjectListPayloadSchema,
   ProjectUpdateCommandPayloadSchema,
   TaskAssignCodeAgentCommandPayloadSchema,
+  TaskAnalysisSummarySchema,
+  TaskApprovePlanCommandPayloadSchema,
   TaskCreateCommandPayloadSchema,
   TaskDeleteCommandPayloadSchema,
   TaskGetCommandPayloadSchema,
   TaskListCommandPayloadSchema,
   TaskListPayloadSchema,
+  TaskPlanSummarySchema,
+  TaskRequestPlanApprovalCommandPayloadSchema,
+  TaskSaveAnalysisCommandPayloadSchema,
+  TaskSavePlanCommandPayloadSchema,
   TaskSetStatusCommandPayloadSchema,
   TaskStatusViewSchema,
   TaskSummarySchema,
@@ -60,11 +66,17 @@ import {
   type TaskDraftAcceptedPayload,
   type TaskDraftFromDescriptionCommandPayload,
   type TaskAssignCodeAgentCommandPayload,
+  type TaskAnalysisSummary,
+  type TaskApprovePlanCommandPayload,
   type TaskCreateCommandPayload,
   type TaskDeleteCommandPayload,
   type TaskGetCommandPayload,
   type TaskListCommandPayload,
   type TaskListPayload,
+  type TaskPlanSummary,
+  type TaskRequestPlanApprovalCommandPayload,
+  type TaskSaveAnalysisCommandPayload,
+  type TaskSavePlanCommandPayload,
   type TaskSetStatusCommandPayload,
   type TaskStatusView,
   type TaskSummary,
@@ -167,6 +179,40 @@ const api: PersonalClawApi = {
           TaskAssignCodeAgentCommandPayloadSchema.parse(payload)
         )
       );
+    },
+    async saveAnalysis(payload: TaskSaveAnalysisCommandPayload): Promise<TaskAnalysisSummary> {
+      return TaskAnalysisSummarySchema.parse(
+        await invokeCommand<TaskAnalysisSummary>(
+          "task.saveAnalysis",
+          TaskSaveAnalysisCommandPayloadSchema.parse(payload)
+        )
+      );
+    },
+    async savePlan(payload: TaskSavePlanCommandPayload): Promise<TaskPlanSummary> {
+      return TaskPlanSummarySchema.parse(
+        await invokeCommand<TaskPlanSummary>(
+          "task.savePlan",
+          TaskSavePlanCommandPayloadSchema.parse(payload)
+        )
+      );
+    },
+    async requestPlanApproval(
+      payload: TaskRequestPlanApprovalCommandPayload
+    ): Promise<TaskPlanSummary> {
+      return TaskPlanSummarySchema.parse(
+        await invokeCommand<TaskPlanSummary>(
+          "task.requestPlanApproval",
+          TaskRequestPlanApprovalCommandPayloadSchema.parse(payload)
+        )
+      );
+    },
+    async approvePlan(payload: TaskApprovePlanCommandPayload): Promise<TaskPlanSummary> {
+      return TaskPlanSummarySchema.parse(
+        await invokeCommand<TaskPlanSummary>(
+          "task.approvePlan",
+          TaskApprovePlanCommandPayloadSchema.parse(payload)
+        )
+      );
     }
   },
   project: {
@@ -260,7 +306,13 @@ const api: PersonalClawApi = {
 
         if (parsed.success) {
           listener(parsed.data as SystemEventEnvelope);
+          return;
         }
+
+        console.error(
+          "[PersonalClaw] Dropped an invalid system event:",
+          parsed.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message }))
+        );
       };
 
       ipcRenderer.on(IPC_EVENT_CHANNEL, handler);

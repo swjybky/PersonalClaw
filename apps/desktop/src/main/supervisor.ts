@@ -11,6 +11,7 @@ import {
   type UtilityWorkerName
 } from "@personal-claw/contracts";
 import { createId, createLogger, nowIso } from "@personal-claw/shared";
+import { isUtilityCoreCommandAllowed } from "./core-command-policy";
 
 type WorkerStatus = UtilityHealthPayload["status"];
 
@@ -459,13 +460,13 @@ export class UtilitySupervisor {
       });
     }
 
-    if (!command.type.startsWith("task.") || command.type === "task.draftFromDescription") {
+    if (!isUtilityCoreCommandAllowed(sourceWorker, command.type)) {
       return Promise.resolve({
         status: "rejected",
         requestId: command.id,
         error: {
           code: "utility.core_bridge_forbidden_command",
-          message: `Core command bridge only accepts task persistence commands, got ${command.type}.`
+          message: `Core command bridge forbids ${command.type} from ${sourceWorker}.`
         }
       });
     }

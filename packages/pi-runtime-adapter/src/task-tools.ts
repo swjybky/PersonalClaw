@@ -6,18 +6,17 @@ export const PERSONAL_TASK_TOOL_NAMES = [
   "task_list",
   "task_get",
   "task_update",
-  "task_start",
   "task_update_progress"
 ] as const;
 
 export type PersonalTaskToolName = (typeof PERSONAL_TASK_TOOL_NAMES)[number];
+export type PersonalTaskToolMode = "task_management" | "none";
 
 export type TaskToolCommandType =
   | "task.create"
   | "task.list"
   | "task.get"
   | "task.update"
-  | "task.setStatus"
   | "task.updateProgress";
 
 export interface TaskToolProxyDetails {
@@ -54,6 +53,7 @@ const taskStatusSchema = Type.Union([
   Type.Literal("draft"),
   Type.Literal("analyzing"),
   Type.Literal("design_ready"),
+  Type.Literal("awaiting_approval"),
   Type.Literal("queued"),
   Type.Literal("running"),
   Type.Literal("paused"),
@@ -92,6 +92,7 @@ const planStepTypeSchema = Type.Union([
   Type.Literal("agent"),
   Type.Literal("tool"),
   Type.Literal("human_input"),
+  Type.Literal("approval"),
   Type.Literal("verification"),
   Type.Literal("notification")
 ]);
@@ -106,6 +107,9 @@ const planStepStatusSchema = Type.Union([
 
 const planStepSchema = Type.Object(
   {
+    key: Type.Optional(
+      Type.String({ minLength: 1, description: "Stable key referenced by dependsOn." })
+    ),
     title: Type.String({
       minLength: 1,
       description: "Human-readable step title."
@@ -251,25 +255,6 @@ export function createPersonalTaskTools(
       executor: options.executor
     }),
     createTaskTool({
-      name: "task_start",
-      label: "Start Task",
-      commandType: "task.setStatus",
-      description:
-        "Move a task into the queued or running state through Core. This changes task status only; it does not execute arbitrary tools.",
-      parameters: Type.Object(
-        {
-          id: Type.String({
-            minLength: 1,
-            description: "Task id to queue or run."
-          }),
-          status: Type.Optional(Type.Union([Type.Literal("queued"), Type.Literal("running")])),
-          reason: Type.Optional(Type.String())
-        },
-        { additionalProperties: false }
-      ),
-      executor: options.executor
-    }),
-    createTaskTool({
       name: "task_update_progress",
       label: "Update Task Progress",
       commandType: "task.updateProgress",
@@ -286,4 +271,11 @@ export function createPersonalTaskTools(
       executor: options.executor
     })
   ];
+}
+
+export function createPersonalTaskToolsForMode(
+  toolMode: PersonalTaskToolMode = "task_management",
+  options: { executor?: TaskToolExecutor | undefined } = {}
+): AgentTool<TSchema, TaskToolProxyDetails>[] {
+  return toolMode === "none" ? [] : createPersonalTaskTools(options);
 }

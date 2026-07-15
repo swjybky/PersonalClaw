@@ -27,6 +27,7 @@ const emit = defineEmits<{
   "update:draft": [value: string];
   "update:thinking-level": [value: ThinkingLevel];
   "open-model-config": [];
+  "organize-task": [content: string];
 }>();
 
 const modelConfig = useModelConfigStore();
@@ -93,6 +94,17 @@ function handleNativeKeyDown(event: KeyboardEvent): void {
 }
 
 const canSend = computed(() => props.draft.trim().length > 0 && !isStreaming.value);
+const canOrganizeTask = computed(() => props.draft.trim().length > 0 && !isStreaming.value);
+
+function organizeTaskDraft(): void {
+  const content = props.draft.trim();
+
+  if (!content || isStreaming.value) {
+    return;
+  }
+
+  emit("organize-task", content);
+}
 
 const sortedModelSummaries = computed(() =>
   [...modelConfig.summaries].sort((left, right) => {
@@ -396,6 +408,16 @@ watch(
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
               </svg>
+            </button>
+
+            <button
+              type="button"
+              class="composer-task-draft-button"
+              title="将当前描述整理为可审阅的任务草稿"
+              :disabled="!canOrganizeTask"
+              @click="organizeTaskDraft"
+            >
+              整理为任务
             </button>
 
           </div>

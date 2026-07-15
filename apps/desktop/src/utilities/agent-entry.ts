@@ -1,14 +1,13 @@
 import {
   CommandEnvelopeSchema,
   CommandResultSchema,
+  TaskDraftCreatedEventEnvelopeSchema,
   createEnvelope,
   type CommandEnvelope,
   type CommandResult,
   type ModelConfigTestResultPayload,
   type PiRuntimeRef,
-  type SystemEventEnvelope,
-  type TaskDraftPreview,
-  type TaskDraftStep
+  type SystemEventEnvelope
 } from "@personal-claw/contracts";
 import { createId, nowIso } from "@personal-claw/shared";
 import {
@@ -20,6 +19,7 @@ import {
 } from "@personal-claw/pi-runtime-adapter";
 import { ModelConfigFileReader } from "./model-config-reader";
 import { bootUtility } from "./runtime";
+import { buildTaskDraftPreview, buildTaskDraftPrompt } from "./task-draft-planning";
 
 const envModelRef = createPiModelRefFromEnv(process.env);
 const modelConfigReader = new ModelConfigFileReader(process.env.PERSONAL_CLAW_USER_DATA_DIR);
@@ -146,7 +146,6 @@ function normalizeTaskToolPayload(input: TaskToolExecutionInput): Record<string,
   if (
     (input.commandType === "task.get" ||
       input.commandType === "task.update" ||
-      input.commandType === "task.setStatus" ||
       input.commandType === "task.updateProgress") &&
     !isNonEmptyString(payload.id) &&
     input.taskId
@@ -160,10 +159,6 @@ function normalizeTaskToolPayload(input: TaskToolExecutionInput): Record<string,
       label: "AI conversation",
       ...(input.sessionId ? { referenceId: input.sessionId } : {})
     };
-  }
-
-  if (input.commandType === "task.setStatus" && !isNonEmptyString(payload.status)) {
-    payload.status = "queued";
   }
 
   return payload;
@@ -381,6 +376,7 @@ function streamPrompt(
     projectId?: string;
     taskId?: string;
     prompt: string;
+    toolMode?: "task_management" | "none";
     thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high";
   },
   correlationId: string,
@@ -421,132 +417,6 @@ function streamPrompt(
   });
 }
 
-function buildTaskDraftPrompt(description: string, maxIterations: number): string {
-  return [
-    "You are the PersonalClaw loop agent for task intake.",
-    "Turn the user's natural-language description into an executable task draft.",
-    "Stay inside draft mode: do not claim persistent state was created.",
-    `Run at most ${maxIterations} loop passes: intake, analysis, plan design.`,
-    "",
-    "Return a concise draft with these sections:",
-    "1. Objective",
-    "2. Missing information",
-    "3. Suggested automation level",
-    "4. Draft steps",
-    "",
-    "User description:",
-    description
-  ].join("\n");
-}
-
-function buildTaskDraftPreview(input: {
-  draftId: string;
-  description: string;
-  assistantText: string;
-  createdAt: string;
-  maxIterations: number;
-}): TaskDraftPreview {
-  const normalizedDescription = input.description.trim().replace(/\s+/g, " ");
-  const objective = normalizedDescription || "Clarify the personal task objective.";
-  const title = makeDraftTitle(objective);
-  const stepSeed = createId("draft_step");
-  const steps: TaskDraftStep[] = [
-    {
-      id: `${stepSeed}_1`,
-      sequence: 1,
-      type: "human_input",
-      title: "Confirm task boundary",
-      goal: "Confirm the project, expected result, deadline, and what the assistant may inspect.",
-      dependsOn: [],
-      expectedSideEffects: [],
-      successCriteria: ["User confirms scope and completion criteria."],
-      retryStrategy: "Ask one focused clarification round if scope is still ambiguous.",
-      rollbackNotes: "No external state changes are made during clarification."
-    },
-    {
-      id: `${stepSeed}_2`,
-      sequence: 2,
-      type: "agent",
-      title: "Refine analysis",
-      goal: "Convert the confirmed objective into constraints, assumptions, risks, and deliverables.",
-      dependsOn: [`${stepSeed}_1`],
-      expectedSideEffects: [],
-      successCriteria: ["Task analysis is editable and reviewable by the user."],
-      retryStrategy: "Regenerate the analysis from the latest confirmed description.",
-      rollbackNotes: "Discard the draft version and keep the previous reviewed draft."
-    },
-    {
-      id: `${stepSeed}_3`,
-      sequence: 3,
-      type: "agent",
-      title: "Draft execution plan",
-      goal: "Create ordered steps with dependencies and verification checks.",
-      dependsOn: [`${stepSeed}_2`],
-      expectedSideEffects: [],
-      successCriteria: ["Every step has a clear goal, dependency, and success criterion."],
-      retryStrategy: "Split any vague step into smaller reviewable steps.",
-      rollbackNotes: "Keep the prior plan version until the new draft is reviewed."
-    }
-  ];
-
-  return {
-    draftId: input.draftId,
-    status: "draft",
-    title,
-    objective,
-    source: {
-      kind: "manual_description",
-      description: input.description
-    },
-    suggestedAutomationLevel: "L0",
-    assumptions: [
-      "The draft is a review artifact, not a persisted Task/Plan/Run state.",
-      "Tools execute via the Tool Utility; persistence is owned by Core in a later phase."
-    ],
-    constraints: [
-      "Renderer has no Node, filesystem, SQLite, key, or pi SDK access.",
-      "Task/Plan/Run persistence must be owned by Core in a later phase."
-    ],
-    missingInformation: [
-      "Target project or workspace",
-      "Definition of done",
-      "Deadline or priority",
-      "Allowed context and data sources"
-    ],
-    expectedArtifacts: ["Editable task analysis", "Draft plan steps"],
-    loopIterations: [
-      {
-        index: 1,
-        phase: "intake",
-        status: "done",
-        summary: "Captured the user description as manual task input."
-      },
-      {
-        index: 2,
-        phase: "analysis",
-        status: "done",
-        summary: "Separated objective, assumptions, constraints, and missing information."
-      },
-      {
-        index: 3,
-        phase: "plan_design",
-        status: "done",
-        summary: "Prepared a non-executing plan preview with dependencies and verification."
-      }
-    ],
-    steps,
-    generatedSummary: input.assistantText.trim() || "The loop agent produced an empty draft summary.",
-    createdAt: input.createdAt
-  };
-}
-
-function makeDraftTitle(objective: string): string {
-  const compact = objective.replace(/[.!?。！？]+$/u, "").trim();
-  const title = compact.length > 72 ? `${compact.slice(0, 69)}...` : compact;
-
-  return title || "Untitled task draft";
-}
-
 function emitTaskDraftCreated(input: {
   draftId: string;
   sessionId: string;
@@ -567,22 +437,24 @@ function emitTaskDraftCreated(input: {
   });
 
   input.emitEvent(
-    createEnvelope(
-      "task.draft_created",
-      {
-        sessionId: input.sessionId,
-        runId: input.runId,
-        draft,
-        runtime: input.runtime
-      },
-      {
-        id: createId("evt"),
-        context: {
-          correlationId: input.correlationId,
+    TaskDraftCreatedEventEnvelopeSchema.parse(
+      createEnvelope(
+        "task.draft_created",
+        {
           sessionId: input.sessionId,
-          runId: input.runId
+          runId: input.runId,
+          draft,
+          runtime: input.runtime
+        },
+        {
+          id: createId("evt"),
+          context: {
+            correlationId: input.correlationId,
+            sessionId: input.sessionId,
+            runId: input.runId
+          }
         }
-      }
+      )
     )
   );
 }
@@ -631,6 +503,7 @@ async function testModelConfig(id: string): Promise<ModelConfigTestResultPayload
       runId: createId("model_test_run"),
       sessionId: `model-test-${id}`,
       prompt: "请只回复 OK，用于 PersonalClaw 模型配置连通性测试。",
+      toolMode: "none",
       thinkingLevel: "off",
       modelRef: resolved.modelRef
     })) {
@@ -706,6 +579,7 @@ bootUtility("agent", {
           runId,
           sessionId,
           prompt,
+          toolMode: "none",
           ...(command.payload.thinkingLevel ? { thinkingLevel: command.payload.thinkingLevel } : {})
         },
         correlationId,

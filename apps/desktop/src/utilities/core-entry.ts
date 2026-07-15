@@ -1,5 +1,6 @@
 import {
   createEnvelope,
+  SystemEventEnvelopeSchema,
   type CodeAgentListPayload,
   type CommandResult,
   type ProjectListPayload,
@@ -12,7 +13,8 @@ import {
   type CodeAgentMutationResult,
   type PersonalClawSqliteStore,
   type ProjectMutationResult,
-  type TaskMutationResult
+  type TaskMutationResult,
+  type TaskPlanningMutationResult
 } from "@personal-claw/infrastructure-sqlite";
 import { createId } from "@personal-claw/shared";
 import { bootUtility } from "./runtime";
@@ -33,22 +35,24 @@ function getStore(): PersonalClawSqliteStore {
   return store;
 }
 
-function createEvent(
-  type: SystemEventEnvelope["type"],
-  payload: SystemEventEnvelope["payload"],
+function createEvent<TType extends SystemEventEnvelope["type"]>(
+  type: TType,
+  payload: Extract<SystemEventEnvelope, { type: TType }>["payload"],
   correlationId: string,
   context: {
     projectId?: string;
     taskId?: string;
   } = {}
 ): SystemEventEnvelope {
-  return createEnvelope(type, payload, {
-    id: createId("evt"),
-    context: {
-      correlationId,
-      ...context
-    }
-  }) as SystemEventEnvelope;
+  return SystemEventEnvelopeSchema.parse(
+    createEnvelope(type, payload, {
+      id: createId("evt"),
+      context: {
+        correlationId,
+        ...context
+      }
+    })
+  ) as SystemEventEnvelope;
 }
 
 function emitTaskMutation(
@@ -62,6 +66,29 @@ function emitTaskMutation(
       taskId: result.task.id
     })
   );
+  for (const event of result.additionalEvents ?? []) {
+    emitEvent(
+      createEvent(event.eventType, event.eventPayload, correlationId, {
+        projectId: result.task.projectId,
+        taskId: result.task.id
+      })
+    );
+  }
+}
+
+function emitTaskPlanningMutation(
+  result: TaskPlanningMutationResult,
+  correlationId: string,
+  emitEvent: (event: SystemEventEnvelope) => void
+): void {
+  for (const event of result.events) {
+    emitEvent(
+      createEvent(event.eventType, event.eventPayload, correlationId, {
+        projectId: result.view.task.projectId,
+        taskId: result.view.task.id
+      })
+    );
+  }
 }
 
 function emitProjectCreated(
@@ -245,6 +272,46 @@ bootUtility("core", {
           status: "accepted",
           requestId: command.id,
           payload: result.task satisfies TaskSummary
+        };
+      }
+
+      case "task.saveAnalysis": {
+        const result = taskStore.saveTaskAnalysis(command.payload);
+        emitTaskPlanningMutation(result, correlationId, emitEvent);
+        return {
+          status: "accepted",
+          requestId: command.id,
+          payload: result.view.analysis
+        };
+      }
+
+      case "task.savePlan": {
+        const result = taskStore.saveTaskPlan(command.payload);
+        emitTaskPlanningMutation(result, correlationId, emitEvent);
+        return {
+          status: "accepted",
+          requestId: command.id,
+          payload: result.view.plan
+        };
+      }
+
+      case "task.requestPlanApproval": {
+        const result = taskStore.requestTaskPlanApproval(command.payload);
+        emitTaskPlanningMutation(result, correlationId, emitEvent);
+        return {
+          status: "accepted",
+          requestId: command.id,
+          payload: result.view.plan
+        };
+      }
+
+      case "task.approvePlan": {
+        const result = taskStore.approveTaskPlan(command.payload);
+        emitTaskPlanningMutation(result, correlationId, emitEvent);
+        return {
+          status: "accepted",
+          requestId: command.id,
+          payload: result.view.plan
         };
       }
 

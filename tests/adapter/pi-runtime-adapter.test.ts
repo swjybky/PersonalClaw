@@ -3,6 +3,7 @@ import {
   PERSONAL_TASK_TOOL_NAMES,
   PiAgentRuntimeAdapter,
   createPersonalTaskTools,
+  createPersonalTaskToolsForMode,
   createPiModelRefFromEnv,
   providerApiKeyEnvVar,
   type AgentRuntimeEvent
@@ -29,9 +30,61 @@ describe("pi runtime adapter", () => {
     expect(tools.map((tool) => tool.name)).not.toContain("bash");
     expect(tools.map((tool) => tool.name)).not.toContain("http_request");
     expect(tools.map((tool) => tool.name)).not.toContain("browser_open");
+    expect(tools.map((tool) => tool.name)).not.toContain("task_start");
+  });
 
-    const startTool = tools.find((tool) => tool.name === "task_start");
-    expect(startTool?.description).toContain("Core");
+  it("accepts awaiting_approval in the task_list status filter", () => {
+    const tool = createPersonalTaskTools({ executor: noopTaskExecutor }).find(
+      (candidate) => candidate.name === "task_list"
+    );
+
+    if (!tool) {
+      throw new Error("task_list tool missing");
+    }
+
+    const parameters = tool.parameters as {
+      properties?: {
+        statuses?: {
+          items?: {
+            anyOf?: Array<{ const?: unknown }>;
+          };
+        };
+      };
+    };
+    const allowedStatuses = parameters.properties?.statuses?.items?.anyOf?.map(
+      (variant) => variant.const
+    );
+
+    expect(allowedStatuses).toContain("awaiting_approval");
+    expect(allowedStatuses).not.toContain("not_a_task_status");
+  });
+
+  it("injects zero task tools and emits no task tool requests in planning mode", async () => {
+    let taskToolExecutions = 0;
+    const taskToolExecutor = async () => {
+      taskToolExecutions += 1;
+      return noopTaskExecutor();
+    };
+
+    expect(createPersonalTaskToolsForMode("none", { executor: taskToolExecutor })).toEqual([]);
+
+    const runtime = new PiAgentRuntimeAdapter({ taskToolExecutor });
+    const events: AgentRuntimeEvent[] = [];
+
+    for await (const event of runtime.start({
+      runId: "run_planning_mode",
+      sessionId: "session_planning_mode",
+      prompt: "只生成任务规划草稿，不创建或启动任务。",
+      toolMode: "none"
+    })) {
+      events.push(event);
+    }
+
+    expect(taskToolExecutions).toBe(0);
+    expect(events.some((event) => event.type === "agent.tool_requested")).toBe(false);
+    expect(events.find((event) => event.type === "agent.completed")?.payload.content).toContain(
+      "无工具规划模式"
+    );
   });
 
   it("throws instead of returning a fake tool result when Core executor is missing", async () => {
@@ -117,7 +170,7 @@ describe("pi runtime adapter", () => {
 
     expect(completed?.payload.content).toContain("**pi-agent-core**");
     expect(completed?.payload.content).toContain("| 项目 | 当前判断 |");
-    expect(completed?.payload.content).toContain("任务新建、任务列表、任务详情、状态和进度更新");
+    expect(completed?.payload.content).toContain("任务新建、任务列表、任务详情、元数据和进度更新");
     expect(completed?.payload.content).toContain("Core 持久化任务库");
     expect(completed?.payload.runtime.mode).toBe("local-faux");
   });

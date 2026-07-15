@@ -3,14 +3,28 @@ import {
   assertTaskCreation,
   assertTaskStatusTransition,
   calculateStepProgressPercent,
-  canTransitionTaskStatus
+  canTransitionTaskStatus,
+  getAvailableTaskStatusTransitions
 } from "@personal-claw/domain";
 
 describe("task status machine", () => {
-  it("allows the Phase 2 happy path statuses once implemented", () => {
+  it("requires plan approval before a task can be queued", () => {
     expect(canTransitionTaskStatus("draft", "analyzing")).toBe(true);
     expect(canTransitionTaskStatus("analyzing", "design_ready")).toBe(true);
+    expect(canTransitionTaskStatus("design_ready", "queued")).toBe(false);
+    expect(canTransitionTaskStatus("design_ready", "awaiting_approval")).toBe(true);
+    expect(canTransitionTaskStatus("awaiting_approval", "queued")).toBe(true);
     expect(canTransitionTaskStatus("queued", "running")).toBe(true);
+  });
+
+  it("returns the available transitions for task detail views", () => {
+    expect(getAvailableTaskStatusTransitions("design_ready")).toEqual([
+      "awaiting_approval",
+      "analyzing",
+      "archived",
+      "cancelled"
+    ]);
+    expect(getAvailableTaskStatusTransitions("archived")).toEqual([]);
   });
 
   it("rejects illegal direct success", () => {

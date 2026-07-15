@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { EnvelopeBaseSchema, type Envelope } from "./envelope";
+import { EnvelopeBaseSchema, EnvelopeContextSchema, type Envelope } from "./envelope";
+import { AutomationLevelSchema } from "./task-draft";
 
 export const OwnerIdSchema = z.string().min(1);
 export const DEFAULT_OWNER_ID = "local-user" as const;
@@ -102,6 +103,7 @@ export const TaskStatusSchema = z.enum([
   "draft",
   "analyzing",
   "design_ready",
+  "awaiting_approval",
   "queued",
   "running",
   "paused",
@@ -134,12 +136,14 @@ export const PlanStepTypeSchema = z.enum([
   "agent",
   "tool",
   "human_input",
+  "approval",
   "verification",
   "notification"
 ]);
 export type PlanStepType = z.infer<typeof PlanStepTypeSchema>;
 
 export const PlanStepInputSchema = z.object({
+  key: z.string().min(1).max(120).optional(),
   title: z.string().min(1).max(200),
   goal: z.string().min(1).max(2_000),
   type: PlanStepTypeSchema,
@@ -152,6 +156,7 @@ export type PlanStepInput = z.infer<typeof PlanStepInputSchema>;
 
 export const PlanStepSummarySchema = z.object({
   id: z.string().min(1),
+  key: z.string().min(1).max(120),
   taskId: z.string().min(1),
   sequence: z.number().int().min(1),
   type: PlanStepTypeSchema,
@@ -164,16 +169,101 @@ export const PlanStepSummarySchema = z.object({
 });
 export type PlanStepSummary = z.infer<typeof PlanStepSummarySchema>;
 
-export const TaskCreateCommandPayloadSchema = z.object({
-  projectId: z.string().min(1),
-  title: z.string().min(1).max(200),
-  goal: z.string().min(1).max(8_000),
-  source: TaskSourceSchema,
-  priority: TaskPrioritySchema.optional(),
-  dueAt: z.string().datetime().nullable().optional(),
-  steps: z.array(PlanStepInputSchema).optional(),
-  codeAgentId: z.string().min(1).nullable().optional()
+export const TaskAnalysisInputSchema = z.object({
+  objective: z.string().min(1).max(8_000),
+  knownInformation: z.array(z.string().min(1).max(4_000)),
+  missingInformation: z.array(z.string().min(1).max(4_000)),
+  constraints: z.array(z.string().min(1).max(4_000)),
+  risks: z.array(z.string().min(1).max(4_000)),
+  expectedArtifacts: z.array(z.string().min(1).max(4_000)),
+  completionDefinition: z.array(z.string().min(1).max(4_000)).min(1),
+  suggestedAutomationLevel: AutomationLevelSchema
 });
+export type TaskAnalysisInput = z.infer<typeof TaskAnalysisInputSchema>;
+
+export const TaskAnalysisSummarySchema = TaskAnalysisInputSchema.extend({
+  id: z.string().min(1),
+  taskId: z.string().min(1),
+  version: z.number().int().min(1),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime()
+});
+export type TaskAnalysisSummary = z.infer<typeof TaskAnalysisSummarySchema>;
+
+export const TaskPlanApprovalStateSchema = z.enum([
+  "not_requested",
+  "pending",
+  "approved",
+  "rejected"
+]);
+export type TaskPlanApprovalState = z.infer<typeof TaskPlanApprovalStateSchema>;
+
+export const TaskPlanApprovalSnapshotSchema = z.object({
+  requestId: z.string().min(1),
+  taskVersion: z.number().int().min(1),
+  analysisVersion: z.number().int().min(1),
+  codeAgentId: z.string().min(1).nullable(),
+  codeAgentUpdatedAt: z.string().datetime().nullable()
+});
+export type TaskPlanApprovalSnapshot = z.infer<typeof TaskPlanApprovalSnapshotSchema>;
+
+export const TaskPlanSummarySchema = z
+  .object({
+    id: z.string().min(1),
+    taskId: z.string().min(1),
+    version: z.number().int().min(1),
+    summary: z.string().min(1).max(8_000),
+    basedOnAnalysisVersion: z.number().int().min(1).nullable(),
+    approvalState: TaskPlanApprovalStateSchema,
+    approvalSnapshot: TaskPlanApprovalSnapshotSchema.nullable(),
+    steps: z.array(PlanStepSummarySchema).min(1),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime()
+  })
+  .superRefine((plan, context) => {
+    if (
+      (plan.approvalState === "pending" || plan.approvalState === "approved") &&
+      plan.approvalSnapshot === null
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["approvalSnapshot"],
+        message: `${plan.approvalState} plans require an approval snapshot.`
+      });
+    }
+
+    if (plan.approvalState === "not_requested" && plan.approvalSnapshot !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["approvalSnapshot"],
+        message: "A not_requested plan cannot carry an approval snapshot."
+      });
+    }
+  });
+export type TaskPlanSummary = z.infer<typeof TaskPlanSummarySchema>;
+
+export const TaskCreateCommandPayloadSchema = z
+  .object({
+    projectId: z.string().min(1),
+    title: z.string().min(1).max(200),
+    goal: z.string().min(1).max(8_000),
+    source: TaskSourceSchema,
+    priority: TaskPrioritySchema.optional(),
+    dueAt: z.string().datetime().nullable().optional(),
+    analysis: TaskAnalysisInputSchema.optional(),
+    planSummary: z.string().min(1).max(8_000).optional(),
+    steps: z.array(PlanStepInputSchema).optional(),
+    codeAgentId: z.string().min(1).nullable().optional()
+  })
+  .superRefine((payload, context) => {
+    if (payload.planSummary && (!payload.steps || payload.steps.length === 0)) {
+      context.addIssue({
+        code: "custom",
+        path: ["steps"],
+        message: "steps must contain at least one item when planSummary is provided."
+      });
+    }
+  });
 export type TaskCreateCommandPayload = z.infer<typeof TaskCreateCommandPayloadSchema>;
 
 export const TaskListCommandPayloadSchema = z.object({
@@ -226,6 +316,38 @@ export const TaskAssignCodeAgentCommandPayloadSchema = z.object({
 });
 export type TaskAssignCodeAgentCommandPayload = z.infer<typeof TaskAssignCodeAgentCommandPayloadSchema>;
 
+export const TaskSaveAnalysisCommandPayloadSchema = z.object({
+  taskId: z.string().min(1),
+  expectedTaskVersion: z.number().int().min(1),
+  analysis: TaskAnalysisInputSchema
+});
+export type TaskSaveAnalysisCommandPayload = z.infer<typeof TaskSaveAnalysisCommandPayloadSchema>;
+
+export const TaskSavePlanCommandPayloadSchema = z.object({
+  taskId: z.string().min(1),
+  expectedTaskVersion: z.number().int().min(1),
+  summary: z.string().min(1).max(8_000),
+  steps: z.array(PlanStepInputSchema).min(1)
+});
+export type TaskSavePlanCommandPayload = z.infer<typeof TaskSavePlanCommandPayloadSchema>;
+
+export const TaskRequestPlanApprovalCommandPayloadSchema = z.object({
+  taskId: z.string().min(1),
+  planId: z.string().min(1),
+  expectedTaskVersion: z.number().int().min(1)
+});
+export type TaskRequestPlanApprovalCommandPayload = z.infer<
+  typeof TaskRequestPlanApprovalCommandPayloadSchema
+>;
+
+export const TaskApprovePlanCommandPayloadSchema = z.object({
+  taskId: z.string().min(1),
+  planId: z.string().min(1),
+  approvalRequestId: z.string().min(1),
+  expectedTaskVersion: z.number().int().min(1)
+});
+export type TaskApprovePlanCommandPayload = z.infer<typeof TaskApprovePlanCommandPayloadSchema>;
+
 export const TaskSummarySchema = z.object({
   id: z.string().min(1),
   projectId: z.string().min(1),
@@ -263,14 +385,44 @@ export const TaskEventSummarySchema = z.object({
 });
 export type TaskEventSummary = z.infer<typeof TaskEventSummarySchema>;
 
+const LegacyTaskStatusPlanStepSummarySchema = z.preprocess((value) => {
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    !("key" in value) &&
+    "id" in value &&
+    typeof value.id === "string"
+  ) {
+    return {
+      ...value,
+      key: value.id
+    };
+  }
+
+  return value;
+}, PlanStepSummarySchema);
+
 export const TaskStatusViewSchema = z.object({
   task: TaskSummarySchema,
-  steps: z.array(PlanStepSummarySchema),
+  // Temporary read compatibility for Phase 1 task-bound steps. New plan
+  // summaries themselves require an explicit stable key.
+  steps: z.array(LegacyTaskStatusPlanStepSummarySchema),
   recentEvents: z.array(TaskEventSummarySchema),
   blockedReason: z.string().nullable(),
-  nextStep: z.string().nullable()
+  nextStep: z.string().nullable(),
+  analysis: TaskAnalysisSummarySchema.nullable().default(null),
+  analysisVersions: z.array(TaskAnalysisSummarySchema).default([]),
+  plan: TaskPlanSummarySchema.nullable().default(null),
+  planVersions: z.array(TaskPlanSummarySchema).default([]),
+  availableTransitions: z.array(TaskStatusSchema).default([])
 });
 export type TaskStatusView = z.infer<typeof TaskStatusViewSchema>;
+
+const CorrelatedEnvelopeBaseSchema = EnvelopeBaseSchema.extend({
+  context: EnvelopeContextSchema.extend({
+    correlationId: z.string().min(1)
+  })
+});
 
 export const ProjectCreateCommandEnvelopeSchema = EnvelopeBaseSchema.extend({
   type: z.literal("project.create"),
@@ -320,6 +472,22 @@ export const TaskUpdateProgressCommandEnvelopeSchema = EnvelopeBaseSchema.extend
 export const TaskAssignCodeAgentCommandEnvelopeSchema = EnvelopeBaseSchema.extend({
   type: z.literal("task.assignCodeAgent"),
   payload: TaskAssignCodeAgentCommandPayloadSchema
+});
+export const TaskSaveAnalysisCommandEnvelopeSchema = CorrelatedEnvelopeBaseSchema.extend({
+  type: z.literal("task.saveAnalysis"),
+  payload: TaskSaveAnalysisCommandPayloadSchema
+});
+export const TaskSavePlanCommandEnvelopeSchema = CorrelatedEnvelopeBaseSchema.extend({
+  type: z.literal("task.savePlan"),
+  payload: TaskSavePlanCommandPayloadSchema
+});
+export const TaskRequestPlanApprovalCommandEnvelopeSchema = CorrelatedEnvelopeBaseSchema.extend({
+  type: z.literal("task.requestPlanApproval"),
+  payload: TaskRequestPlanApprovalCommandPayloadSchema
+});
+export const TaskApprovePlanCommandEnvelopeSchema = CorrelatedEnvelopeBaseSchema.extend({
+  type: z.literal("task.approvePlan"),
+  payload: TaskApprovePlanCommandPayloadSchema
 });
 
 export const CodeAgentListCommandEnvelopeSchema = EnvelopeBaseSchema.extend({
@@ -380,6 +548,37 @@ export const TaskArchivedEventEnvelopeSchema = EnvelopeBaseSchema.extend({
     task: TaskSummarySchema
   })
 });
+export const TaskAnalysisSavedEventEnvelopeSchema = CorrelatedEnvelopeBaseSchema.extend({
+  type: z.literal("task.analysis_saved"),
+  payload: z.object({
+    analysis: TaskAnalysisSummarySchema
+  })
+});
+export const PlanVersionCreatedEventEnvelopeSchema = CorrelatedEnvelopeBaseSchema.extend({
+  type: z.literal("plan.version_created"),
+  payload: z.object({
+    plan: TaskPlanSummarySchema
+  })
+});
+export const PlanApprovalRequestedEventEnvelopeSchema = CorrelatedEnvelopeBaseSchema.extend({
+  type: z.literal("plan.approval_requested"),
+  payload: z.object({
+    plan: TaskPlanSummarySchema
+  })
+});
+export const PlanApprovedEventEnvelopeSchema = CorrelatedEnvelopeBaseSchema.extend({
+  type: z.literal("plan.approved"),
+  payload: z.object({
+    plan: TaskPlanSummarySchema
+  })
+});
+export const PlanRejectedEventEnvelopeSchema = CorrelatedEnvelopeBaseSchema.extend({
+  type: z.literal("plan.rejected"),
+  payload: z.object({
+    plan: TaskPlanSummarySchema,
+    reason: z.enum(["analysis_revised", "plan_revised"])
+  })
+});
 export const CodeAgentUpdatedEventEnvelopeSchema = EnvelopeBaseSchema.extend({
   type: z.literal("codeAgent.updated"),
   payload: z.object({
@@ -415,6 +614,23 @@ export type TaskProgressChangedEventEnvelope = Envelope<
 export type TaskArchivedEventEnvelope = Envelope<
   { taskId: string; projectId: string; task: TaskSummary },
   "task.archived"
+>;
+export type TaskAnalysisSavedEventEnvelope = Envelope<
+  { analysis: TaskAnalysisSummary },
+  "task.analysis_saved"
+>;
+export type PlanVersionCreatedEventEnvelope = Envelope<
+  { plan: TaskPlanSummary },
+  "plan.version_created"
+>;
+export type PlanApprovalRequestedEventEnvelope = Envelope<
+  { plan: TaskPlanSummary },
+  "plan.approval_requested"
+>;
+export type PlanApprovedEventEnvelope = Envelope<{ plan: TaskPlanSummary }, "plan.approved">;
+export type PlanRejectedEventEnvelope = Envelope<
+  { plan: TaskPlanSummary; reason: "analysis_revised" | "plan_revised" },
+  "plan.rejected"
 >;
 export type CodeAgentUpdatedEventEnvelope = Envelope<
   { profile: CodeAgentProfile },

@@ -23,7 +23,12 @@ import { moonshotaiCnProvider } from "@earendil-works/pi-ai/providers/moonshotai
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { xiaomiTokenPlanCnProvider } from "@earendil-works/pi-ai/providers/xiaomi-token-plan-cn";
 import { zaiCodingCnProvider } from "@earendil-works/pi-ai/providers/zai-coding-cn";
-import { createPersonalTaskTools, type TaskToolExecutor } from "./task-tools";
+import {
+  createPersonalTaskTools,
+  createPersonalTaskToolsForMode,
+  type PersonalTaskToolMode,
+  type TaskToolExecutor
+} from "./task-tools";
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high";
 
@@ -66,6 +71,7 @@ export interface AgentRunInput {
   projectId?: string;
   taskId?: string;
   prompt: string;
+  toolMode?: PersonalTaskToolMode;
   thinkingLevel?: ThinkingLevel;
   modelRef?: PiModelRef;
 }
@@ -159,7 +165,7 @@ type PiRuntimeSession =
       models: Models;
       model: Model<Api>;
       runtime: PiRuntimeRef;
-      setPrompt(prompt: string): void;
+      setPrompt(prompt: string, toolMode: PersonalTaskToolMode): void;
     }
   | {
       kind: "provider";
@@ -283,6 +289,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
 
   async *start(input: AgentRunInput): AsyncIterable<AgentRuntimeEvent> {
     const queue = new AsyncEventQueue<AgentRuntimeEvent>();
+    const toolMode = input.toolMode ?? "task_management";
     const runtimeSession = this.createRuntimeSession(
       this.resolveModelRef(input.modelRef)
     );
@@ -290,7 +297,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     const userPrompt = buildTaskManagerUserPrompt(input);
     const taskToolExecutor = this.taskToolExecutor;
     const taskTools = taskToolExecutor
-      ? createPersonalTaskTools({
+      ? createPersonalTaskToolsForMode(toolMode, {
           executor: (toolInput) =>
             taskToolExecutor({
               ...toolInput,
@@ -303,12 +310,12 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       : [];
 
     if (runtimeSession.kind === "faux") {
-      runtimeSession.setPrompt(userPrompt);
+      runtimeSession.setPrompt(userPrompt, toolMode);
     }
 
     const agent = new Agent({
       initialState: {
-        systemPrompt: this.systemPrompt,
+        systemPrompt: buildSystemPromptForToolMode(this.systemPrompt, toolMode),
         model: runtimeSession.model,
         thinkingLevel: input.thinkingLevel ?? "off",
         tools: taskTools
@@ -457,8 +464,8 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           model: model.id,
           mode: "local-faux"
         },
-        setPrompt(prompt: string): void {
-          faux.setResponses([fauxAssistantMessage(buildLocalTaskPlannerResponse(prompt))]);
+        setPrompt(prompt: string, toolMode: PersonalTaskToolMode): void {
+          faux.setResponses([fauxAssistantMessage(buildLocalTaskPlannerResponse(prompt, toolMode))]);
         }
       };
     }
@@ -718,22 +725,95 @@ function readAssistantThinking(message: AssistantMessage): string {
 function buildPersonalTaskSystemPrompt(): string {
   return [
     "你是 PersonalClaw 的后端任务管理智能体核心。",
-    "你的唯一产品职责是帮助用户管理 PersonalClaw Core 中持久化的任务体系：任务新建、任务列表、任务详情、任务元数据更新、任务启动状态和任务进度更新。",
-    "Core 的任务数据库是唯一事实来源。只要用户要创建、查询、更新、启动或推进任务，必须优先调用对应任务工具，而不是在聊天里编造状态。",
-    "当前可用工具只有：task_create、task_list、task_get、task_update、task_start、task_update_progress。",
-    "工具到 Core 的映射是：task_create -> task.create，task_list -> task.list，task_get -> task.get，task_update -> task.update，task_start -> task.setStatus，task_update_progress -> task.updateProgress。",
+    "你的唯一产品职责是帮助用户管理 PersonalClaw Core 中持久化的任务体系：任务新建、任务列表、任务详情、任务元数据更新和任务进度更新。",
+    "Core 的任务数据库是唯一事实来源。只要用户要创建、查询、更新或推进任务进度，必须优先调用对应任务工具，而不是在聊天里编造状态。",
+    "当前可用任务工具只有：task_create、task_list、task_get、task_update、task_update_progress。",
+    "工具到 Core 的映射是：task_create -> task.create，task_list -> task.list，task_get -> task.get，task_update -> task.update，task_update_progress -> task.updateProgress。",
+    "任务进入 queued/running 必须经过计划审批与 Core 执行门禁；你没有直接启动任务或绕过审批改变执行状态的工具。",
     "不得使用或声称拥有文件、Shell、HTTP、浏览器、邮件、日历、代码执行、数据库直连等非任务系统工具。",
-    "Agent Utility 不直接访问 SQLite；所有持久化状态变化必须通过工具路由到 Core。只有工具结果 status 为 accepted 时，才可以说任务已经创建、更新、启动或推进。",
+    "Agent Utility 不直接访问 SQLite；所有持久化状态变化必须通过工具路由到 Core。只有工具结果 status 为 accepted 时，才可以说任务已经创建、更新或推进。",
     "如果 Context Pack 提供 activeProjectId，创建和列出任务时默认使用它；如果缺少 projectId 或 taskId，先问一个必要问题，不要猜测。",
     "新建任务时提炼 title、goal、priority、source，并在用户提供足够信息时补充 steps；source.kind 默认使用 conversation。",
-    "查询任务列表时先调用 task_list；查看某个任务状态时先调用 task_get；更新进度时先调用 task_update_progress；开始任务时只改变状态，不宣称已经执行外部工作。",
+    "查询任务列表时先调用 task_list；查看某个任务状态时先调用 task_get；更新进度时先调用 task_update_progress；用户要求开始执行时，说明需要先完成计划审批，不得自行把任务改为 queued/running。",
     "回复以任务结果为中心，简短说明任务 id、状态、进度、下一步或缺失信息。",
     "使用 Markdown 排版：不同要点之间空一行；并列信息用无序列表；关键项加粗。不要输出一整段无换行的长文字。"
   ].join("\n");
 }
 
-function buildLocalTaskPlannerResponse(prompt: string): string {
+function buildSystemPromptForToolMode(
+  basePrompt: string,
+  toolMode: PersonalTaskToolMode
+): string {
+  if (toolMode === "task_management") {
+    return basePrompt;
+  }
+
+  return [
+    basePrompt,
+    "",
+    "本次运行是无工具规划模式（toolMode=none）。",
+    "本次运行未注入任何任务工具，不得发起工具调用，不得创建、更新、启动任务，也不得声称已改变 Core 持久化状态。",
+    "只输出当前规划请求要求的草稿内容，等待用户审批后再由 Core 进入后续流程。"
+  ].join("\n");
+}
+
+function buildLocalTaskPlannerResponse(
+  prompt: string,
+  toolMode: PersonalTaskToolMode
+): string {
   const goal = extractUserRequest(prompt).replace(/\s+/g, " ").slice(0, 180);
+
+  if (toolMode === "none") {
+    if (prompt.includes("PERSONAL_CLAW_TASK_DRAFT_JSON_V1")) {
+      const description = extractTaskDraftDescription(prompt);
+      return JSON.stringify({
+        title: description.replace(/[.!?。！？]+$/u, "").slice(0, 72) || "待确认任务",
+        objective: description || "确认任务目标与完成定义",
+        assumptions: ["该草稿需要用户确认后才会由 Core 持久化"],
+        constraints: ["规划阶段不调用工具，不改变外部状态"],
+        missingInformation: [],
+        expectedArtifacts: ["结构化任务分析", "可审批的方案版本"],
+        suggestedAutomationLevel: "L0",
+        steps: [
+          {
+            id: "step_1",
+            type: "agent",
+            title: "完善任务分析",
+            goal: "确认目标、约束、风险与完成条件",
+            dependsOn: [],
+            expectedSideEffects: [],
+            successCriteria: ["任务分析可由用户审阅"],
+            retryStrategy: "根据用户补充信息生成新分析版本",
+            rollbackNotes: "保留上一版分析"
+          },
+          {
+            id: "step_2",
+            type: "approval",
+            title: "批准执行方案",
+            goal: "由用户批准最新方案版本",
+            dependsOn: ["step_1"],
+            expectedSideEffects: [],
+            successCriteria: ["用户明确批准最新方案版本"],
+            retryStrategy: "未批准时返回方案编辑",
+            rollbackNotes: "未批准方案不得进入执行队列"
+          }
+        ]
+      });
+    }
+
+    return [
+      "本次运行处于 **无工具规划模式**。",
+      "",
+      `**规划输入**：${goal || "等待补充任务目标"}`,
+      "",
+      "| 项目 | 当前判断 |",
+      "| --- | --- |",
+      "| toolMode | none |",
+      "| 当前工具 | 无 |",
+      "| 持久化状态 | 不创建、不更新、不启动任务 |",
+      "| 注意 | 本地 faux 模型用于链路验证；不发起任务工具请求 |"
+    ].join("\n");
+  }
 
   return [
     "我已经通过 **pi-agent-core** 接入 **PersonalClaw Core 任务管理智能体**。",
@@ -742,8 +822,8 @@ function buildLocalTaskPlannerResponse(prompt: string): string {
     "",
     "| 项目 | 当前判断 |",
     "| --- | --- |",
-    "| 智能体职责 | 任务新建、任务列表、任务详情、状态和进度更新 |",
-    "| 当前工具 | task_create / task_list / task_get / task_update / task_start / task_update_progress |",
+    "| 智能体职责 | 任务新建、任务列表、任务详情、元数据和进度更新 |",
+    "| 当前工具 | task_create / task_list / task_get / task_update / task_update_progress |",
     "| 状态来源 | Core 持久化任务库 |",
     "| 注意 | 本地 faux 模型用于链路验证，不会主动发起真实工具调用 |",
     "",
@@ -751,11 +831,22 @@ function buildLocalTaskPlannerResponse(prompt: string): string {
   ].join("\n");
 }
 
+function extractTaskDraftDescription(prompt: string): string {
+  const marker = "\nUser description:\n";
+  const markerIndex = prompt.lastIndexOf(marker);
+  if (markerIndex === -1) {
+    return extractUserRequest(prompt).trim();
+  }
+  return prompt.slice(markerIndex + marker.length).trim();
+}
+
 function buildTaskManagerUserPrompt(input: AgentRunInput): string {
+  const toolMode = input.toolMode ?? "task_management";
   const contextLines = [
     "Context Pack:",
     `- sessionId: ${input.sessionId ?? "unavailable"}`,
     `- runId: ${input.runId}`,
+    `- toolMode: ${toolMode}`,
     input.projectId
       ? `- activeProjectId: ${input.projectId}`
       : "- activeProjectId: unavailable; ask for the target project before creating or listing persisted tasks.",
@@ -784,6 +875,8 @@ function extractUserRequest(prompt: string): string {
 export {
   PERSONAL_TASK_TOOL_NAMES,
   createPersonalTaskTools,
+  createPersonalTaskToolsForMode,
+  type PersonalTaskToolMode,
   type TaskToolExecutionInput,
   type TaskToolExecutor
 } from "./task-tools";

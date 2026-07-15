@@ -5,9 +5,12 @@ import {
   CodeAgentListPayloadSchema,
   CodeAgentProfileSchema,
   DEFAULT_OWNER_ID,
+  PlanStepSummarySchema,
   ProjectListPayloadSchema,
   ProjectSummarySchema,
+  TaskAnalysisSummarySchema,
   TaskListPayloadSchema,
+  TaskPlanSummarySchema,
   TaskSourceSchema,
   TaskStatusViewSchema,
   TaskSummarySchema,
@@ -22,13 +25,22 @@ import {
   type ProjectListPayload,
   type ProjectSummary,
   type ProjectUpdateCommandPayload,
+  type PlanStepInput,
   type TaskAssignCodeAgentCommandPayload,
+  type TaskApprovePlanCommandPayload,
+  type TaskAnalysisInput,
+  type TaskAnalysisSummary,
   type TaskCreateCommandPayload,
   type TaskDeleteCommandPayload,
   type TaskEventSummary,
   type TaskGetCommandPayload,
   type TaskListCommandPayload,
   type TaskListPayload,
+  type TaskPlanSummary,
+  type TaskPlanApprovalState,
+  type TaskRequestPlanApprovalCommandPayload,
+  type TaskSaveAnalysisCommandPayload,
+  type TaskSavePlanCommandPayload,
   type TaskSetStatusCommandPayload,
   type TaskStatusDto,
   type TaskStatusView,
@@ -38,10 +50,12 @@ import {
 } from "@personal-claw/contracts";
 import {
   assertTaskCreation,
+  assertPlanStepDag,
   assertTaskProgress,
   assertTaskStatusChange,
   calculateStepProgressPercent,
   canArchiveTaskStatus,
+  getAvailableTaskStatusTransitions,
   type PlanStepProgressStatus
 } from "@personal-claw/domain";
 import { createId, nowIso } from "@personal-claw/shared";
@@ -60,6 +74,7 @@ export const sqliteRuntimeBoundary: SqliteRuntimeBoundary = {
 
 export interface TaskMutationResult {
   task: TaskSummary;
+  additionalEvents?: TaskPlanningEvent[];
   eventType:
     | "task.created"
     | "task.updated"
@@ -92,6 +107,46 @@ export interface ProjectMutationResult {
 export interface CodeAgentMutationResult {
   profile: CodeAgentProfile;
   list: CodeAgentListPayload;
+}
+
+export type TaskPlanningEvent =
+  | {
+      eventType: "task.analysis_saved";
+      eventPayload: { analysis: TaskAnalysisSummary };
+    }
+  | {
+      eventType: "plan.version_created";
+      eventPayload: { plan: TaskPlanSummary };
+    }
+  | {
+      eventType: "plan.approval_requested";
+      eventPayload: { plan: TaskPlanSummary };
+    }
+  | {
+      eventType: "plan.approved";
+      eventPayload: { plan: TaskPlanSummary };
+    }
+  | {
+      eventType: "plan.rejected";
+      eventPayload: {
+        plan: TaskPlanSummary;
+        reason: "analysis_revised" | "plan_revised";
+      };
+    }
+  | {
+      eventType: "task.status_changed";
+      eventPayload: {
+        taskId: string;
+        projectId: string;
+        fromStatus: TaskStatusDto;
+        toStatus: TaskStatusDto;
+        task: TaskSummary;
+      };
+    };
+
+export interface TaskPlanningMutationResult {
+  view: TaskStatusView;
+  events: TaskPlanningEvent[];
 }
 
 interface StoreOptions {
@@ -280,6 +335,55 @@ interface PlanStepRow {
   title: string;
   goal: string;
   status: PlanStepProgressStatus;
+  input_json: string;
+  depends_on_json: string;
+  success_criteria_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface TaskAnalysisRow {
+  id: string;
+  task_id: string;
+  version: number;
+  objective: string;
+  known_information_json: string;
+  missing_information_json: string;
+  constraints_json: string;
+  risks_json: string;
+  expected_artifacts_json: string;
+  completion_definition_json: string;
+  suggested_automation_level: "L0" | "L1" | "L2" | "L3" | "L4";
+  created_at: string;
+  updated_at: string;
+}
+
+interface TaskPlanRow {
+  id: string;
+  task_id: string;
+  version: number;
+  summary: string;
+  based_on_analysis_version: number | null;
+  approval_state: "not_requested" | "pending" | "approved" | "rejected";
+  approval_request_id: string | null;
+  approval_task_version: number | null;
+  approval_analysis_version: number | null;
+  approval_code_agent_id: string | null;
+  approval_code_agent_updated_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface TaskPlanStepRow {
+  id: string;
+  plan_id: string;
+  task_id: string;
+  step_key: string;
+  sequence: number;
+  type: "agent" | "tool" | "human_input" | "approval" | "verification" | "notification";
+  title: string;
+  goal: string;
+  status: PlanStepProgressStatus;
   depends_on_json: string;
   success_criteria_json: string;
   updated_at: string;
@@ -375,6 +479,66 @@ function toPlanStepSummary(row: PlanStepRow) {
   };
 }
 
+function toTaskAnalysisSummary(row: TaskAnalysisRow): TaskAnalysisSummary {
+  return TaskAnalysisSummarySchema.parse({
+    id: row.id,
+    taskId: row.task_id,
+    version: row.version,
+    objective: row.objective,
+    knownInformation: parseStringArray(row.known_information_json),
+    missingInformation: parseStringArray(row.missing_information_json),
+    constraints: parseStringArray(row.constraints_json),
+    risks: parseStringArray(row.risks_json),
+    expectedArtifacts: parseStringArray(row.expected_artifacts_json),
+    completionDefinition: parseStringArray(row.completion_definition_json),
+    suggestedAutomationLevel: row.suggested_automation_level,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  });
+}
+
+function toTaskPlanStepSummary(row: TaskPlanStepRow) {
+  return PlanStepSummarySchema.parse({
+    id: row.id,
+    key: row.step_key,
+    taskId: row.task_id,
+    sequence: row.sequence,
+    type: row.type,
+    title: row.title,
+    goal: row.goal,
+    status: row.status,
+    dependsOn: parseStringArray(row.depends_on_json),
+    successCriteria: parseStringArray(row.success_criteria_json),
+    updatedAt: row.updated_at
+  });
+}
+
+function toTaskPlanSummary(row: TaskPlanRow, steps: readonly TaskPlanStepRow[]): TaskPlanSummary {
+  return TaskPlanSummarySchema.parse({
+    id: row.id,
+    taskId: row.task_id,
+    version: row.version,
+    summary: row.summary,
+    basedOnAnalysisVersion: row.based_on_analysis_version,
+    approvalState: row.approval_state,
+    approvalSnapshot:
+      row.approval_request_id &&
+      row.approval_task_version !== null &&
+      row.approval_analysis_version !== null
+        ? {
+            requestId: row.approval_request_id,
+            taskVersion: row.approval_task_version,
+            analysisVersion: row.approval_analysis_version,
+            codeAgentId: row.approval_code_agent_id,
+            codeAgentUpdatedAt: row.approval_code_agent_updated_at
+          }
+        : null,
+    steps: steps.map(toTaskPlanStepSummary),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  });
+}
+
 function parseStringArray(value: string): string[] {
   const raw = parseJson(value);
 
@@ -383,6 +547,47 @@ function parseStringArray(value: string): string[] {
   }
 
   return raw.filter((item): item is string => typeof item === "string");
+}
+
+interface NormalizedPlanStep extends PlanStepInput {
+  key: string;
+}
+
+function normalizePlanSteps(steps: readonly PlanStepInput[]): NormalizedPlanStep[] {
+  const normalized = steps.map((step, index) => ({
+    ...step,
+    key: step.key?.trim() || `step_${index + 1}`,
+    // Phase 2 plans describe future work. Runtime status is owned by the
+    // Phase 4 Run Coordinator and cannot be supplied by a draft or Renderer.
+    status: "pending" as const,
+    dependsOn: (step.dependsOn ?? []).map((dependency) => dependency.trim())
+  }));
+
+  assertPlanStepDag(normalized);
+  return normalized;
+}
+
+const workflowOwnedStatusTargets = new Set<TaskStatusDto>([
+  "awaiting_approval",
+  "queued",
+  "running",
+  "paused",
+  "verifying",
+  "succeeded"
+]);
+
+function getAvailableTaskCommandTransitions(status: TaskStatusDto): TaskStatusDto[] {
+  if (status === "awaiting_approval") {
+    // These are reached through saveAnalysis, savePlan, and approvePlan,
+    // never through the generic task.setStatus command.
+    return ["analyzing", "design_ready", "queued"];
+  }
+
+  return getAvailableTaskStatusTransitions(status).filter(
+    (target) =>
+      (status === "design_ready" && target === "awaiting_approval") ||
+      !workflowOwnedStatusTargets.has(target)
+  );
 }
 
 function isSqliteError(error: unknown): error is { code: string; message: string } {
@@ -537,6 +742,7 @@ export class PersonalClawSqliteStore {
     const existing = this.getCodeAgentRow(id);
 
     if (existing) {
+      this.assertCodeAgentProfileMutable(id);
       this.db
         .prepare(
           `UPDATE code_agent_profiles
@@ -587,15 +793,24 @@ export class PersonalClawSqliteStore {
 
   deleteCodeAgent(payload: CodeAgentDeleteCommandPayload): CodeAgentMutationResult {
     const profile = this.requireCodeAgent(payload.id);
+    const assignedTask = this.db
+      .prepare(
+        `SELECT id FROM tasks
+        WHERE code_agent_id = @id AND archived_at IS NULL
+        LIMIT 1`
+      )
+      .get({ id: payload.id }) as { id: string } | undefined;
+    if (assignedTask) {
+      throw new Error(
+        `codeAgent profile ${payload.id} is assigned to task ${assignedTask.id}; unassign it before deleting the profile.`
+      );
+    }
     const archivedAt = this.now();
 
     this.db
       .prepare(
         "UPDATE code_agent_profiles SET archived_at = @archivedAt, enabled = 0, updated_at = @archivedAt WHERE id = @id"
       )
-      .run({ id: payload.id, archivedAt });
-    this.db
-      .prepare("UPDATE tasks SET code_agent_id = NULL, updated_at = @archivedAt WHERE code_agent_id = @id")
       .run({ id: payload.id, archivedAt });
 
     return {
@@ -627,16 +842,21 @@ export class PersonalClawSqliteStore {
     const events = this.db
       .prepare("SELECT * FROM task_events WHERE task_id = @taskId ORDER BY sequence DESC LIMIT 12")
       .all({ taskId: payload.id }) as TaskEventRow[];
-    const steps = this.db
-      .prepare("SELECT * FROM plan_steps WHERE task_id = @taskId ORDER BY sequence ASC")
-      .all({ taskId: payload.id }) as PlanStepRow[];
+    const analysisVersions = this.listTaskAnalyses(payload.id);
+    const planVersions = this.listTaskPlans(task);
+    const plan = planVersions[0] ?? null;
 
     return TaskStatusViewSchema.parse({
       task,
-      steps: steps.map(toPlanStepSummary),
+      steps: plan?.steps ?? [],
       recentEvents: events.map(toTaskEventSummary),
       blockedReason: task.blockedReason,
-      nextStep: task.nextStep
+      nextStep: task.nextStep,
+      analysis: analysisVersions[0] ?? null,
+      analysisVersions,
+      plan,
+      planVersions,
+      availableTransitions: getAvailableTaskCommandTransitions(task.status)
     });
   }
 
@@ -644,7 +864,10 @@ export class PersonalClawSqliteStore {
     const result = this.db.transaction(() => {
       const project = this.requireProject(payload.projectId);
       const source = TaskSourceSchema.parse(payload.source);
-      const steps = payload.steps ?? [];
+      const steps = normalizePlanSteps(payload.steps ?? []);
+      if (payload.planSummary && steps.length === 0) {
+        throw new Error("Task planSummary requires at least one plan step.");
+      }
       const now = this.now();
       const id = this.makeId("task");
       const progressPercent = calculateStepProgressPercent(
@@ -690,46 +913,58 @@ export class PersonalClawSqliteStore {
           createdAt: now
         });
 
-      for (const [index, step] of steps.entries()) {
-        this.db
-          .prepare(
-            `INSERT INTO plan_steps (
-              id, task_id, sequence, type, title, goal, status,
-              input_json, depends_on_json, success_criteria_json, created_at, updated_at
-            ) VALUES (
-              @id, @taskId, @sequence, @type, @title, @goal, @status,
-              @inputJson, @dependsOnJson, @successCriteriaJson, @createdAt, @createdAt
-            )`
+      const analysis = payload.analysis
+        ? this.insertAnalysisVersion(id, 1, payload.analysis, now)
+        : null;
+      const plan = steps.length > 0
+        ? this.insertPlanVersion(
+            id,
+            1,
+            payload.planSummary?.trim() || payload.goal.trim(),
+            steps,
+            now,
+            "not_requested"
           )
-          .run({
-            id: this.makeId("step"),
-            taskId: id,
-            sequence: index + 1,
-            type: step.type,
-            title: step.title.trim(),
-            goal: step.goal.trim(),
-            status: step.status ?? "pending",
-            inputJson: stringifyJson(step.input ?? {}),
-            dependsOnJson: stringifyJson(step.dependsOn ?? []),
-            successCriteriaJson: stringifyJson(step.successCriteria ?? []),
-            createdAt: now
-          });
-      }
+        : null;
 
       const task = this.requireTask(id);
       this.appendTaskEvent(task, "task.created", { task }, now);
-      return task;
+      if (analysis) {
+        this.appendTaskEvent(task, "task.analysis_saved", { analysis }, now);
+      }
+      if (plan) {
+        this.appendTaskEvent(task, "plan.version_created", { plan }, now);
+      }
+      const additionalEvents: TaskPlanningEvent[] = [];
+      if (analysis) {
+        additionalEvents.push({
+          eventType: "task.analysis_saved",
+          eventPayload: { analysis }
+        });
+      }
+      if (plan) {
+        additionalEvents.push({
+          eventType: "plan.version_created",
+          eventPayload: { plan }
+        });
+      }
+      return { task, additionalEvents };
     })();
 
     return {
-      task: result,
+      task: result.task,
       eventType: "task.created",
-      eventPayload: { task: result }
+      eventPayload: { task: result.task },
+      additionalEvents: result.additionalEvents
     };
   }
 
   updateTask(payload: TaskUpdateCommandPayload): TaskMutationResult {
+    return this.db.transaction<TaskMutationResult>(() => {
     const task = this.requireTask(payload.id);
+    if (["awaiting_approval", "queued", "running", "verifying"].includes(task.status)) {
+      throw new Error(`Task metadata is frozen while task is ${task.status}.`);
+    }
     if (payload.codeAgentId) {
       this.requireCodeAgent(payload.codeAgentId);
     }
@@ -780,12 +1015,21 @@ export class PersonalClawSqliteStore {
       eventType: "task.updated",
       eventPayload: { task: updated }
     };
+    })();
   }
 
   deleteTask(payload: TaskDeleteCommandPayload): TaskMutationResult {
+    return this.db.transaction<TaskMutationResult>(() => {
     const task = this.requireTask(payload.id);
+    if (task.status === "awaiting_approval") {
+      throw new Error("Revise the pending plan before archiving a task that is awaiting approval.");
+    }
+    if (!canArchiveTaskStatus(task.status)) {
+      throw new Error(
+        `Task cannot be archived while it is ${task.status}; cancel or finish the active workflow first.`
+      );
+    }
     const archivedAt = this.now();
-    const nextStatus = canArchiveTaskStatus(task.status) ? "archived" : task.status;
 
     this.db
       .prepare(
@@ -798,7 +1042,7 @@ export class PersonalClawSqliteStore {
       )
       .run({
         id: payload.id,
-        status: nextStatus,
+        status: "archived",
         archivedAt
       });
 
@@ -814,10 +1058,20 @@ export class PersonalClawSqliteStore {
         task: archived
       }
     };
+    })();
   }
 
   setTaskStatus(payload: TaskSetStatusCommandPayload): TaskMutationResult {
+    return this.db.transaction<TaskMutationResult>(() => {
     const task = this.requireTask(payload.id);
+    if (task.status === "awaiting_approval") {
+      throw new Error("An awaiting approval task can only change through plan approval or plan revision.");
+    }
+    if (workflowOwnedStatusTargets.has(payload.status)) {
+      throw new Error(
+        `Task status ${payload.status} is controlled by plan approval or the Run Coordinator and cannot be set directly.`
+      );
+    }
     assertTaskStatusChange(task.status, payload.status);
     const updatedAt = this.now();
 
@@ -833,7 +1087,7 @@ export class PersonalClawSqliteStore {
       .run({
         id: payload.id,
         status: payload.status,
-        blockedReason: payload.status === "blocked" ? payload.reason ?? task.blockedReason : task.blockedReason,
+        blockedReason: payload.status === "blocked" ? payload.reason ?? task.blockedReason : null,
         updatedAt
       });
 
@@ -852,11 +1106,18 @@ export class PersonalClawSqliteStore {
       eventType: "task.status_changed",
       eventPayload
     };
+    })();
   }
 
   updateTaskProgress(payload: TaskUpdateProgressCommandPayload): TaskMutationResult {
+    return this.db.transaction<TaskMutationResult>(() => {
     assertTaskProgress(payload.progressPercent);
     const task = this.requireTask(payload.id);
+    if (!["running", "paused", "blocked"].includes(task.status)) {
+      throw new Error(
+        `Task progress can only be reported by an active Run Coordinator; got ${task.status}.`
+      );
+    }
     const updatedAt = this.now();
 
     this.db
@@ -892,6 +1153,7 @@ export class PersonalClawSqliteStore {
       eventType: "task.progress_changed",
       eventPayload
     };
+    })();
   }
 
   assignCodeAgent(payload: TaskAssignCodeAgentCommandPayload): TaskMutationResult {
@@ -903,6 +1165,337 @@ export class PersonalClawSqliteStore {
       id: payload.id,
       codeAgentId: payload.codeAgentId
     });
+  }
+
+  saveTaskAnalysis(payload: TaskSaveAnalysisCommandPayload): TaskPlanningMutationResult {
+    const result = this.db.transaction(() => {
+      const task = this.requireTask(payload.taskId);
+      this.assertExpectedTaskVersion(task, payload.expectedTaskVersion);
+      if (["queued", "running", "verifying", "succeeded", "archived"].includes(task.status)) {
+        throw new Error(`Task analysis cannot be edited while task is ${task.status}.`);
+      }
+      const previousPlan = this.listTaskPlans(task)[0] ?? null;
+      const current = this.db
+        .prepare(
+          "SELECT COALESCE(MAX(version), 0) AS version FROM task_analysis_versions WHERE task_id = @taskId"
+        )
+        .get({ taskId: task.id }) as { version: number };
+      const updatedAt = this.now();
+      const analysis = this.insertAnalysisVersion(task.id, current.version + 1, payload.analysis, updatedAt);
+      const events: TaskPlanningEvent[] = [
+        {
+          eventType: "task.analysis_saved",
+          eventPayload: { analysis }
+        }
+      ];
+      let rejectedPlan: TaskPlanSummary | null = null;
+
+      if (
+        task.status === "awaiting_approval" &&
+        previousPlan?.approvalState === "pending" &&
+        !previousPlan.id.startsWith("legacy_")
+      ) {
+        this.db
+          .prepare(
+            `UPDATE task_plan_versions
+            SET approval_state = 'rejected', updated_at = @updatedAt
+            WHERE id = @planId AND task_id = @taskId`
+          )
+          .run({ planId: previousPlan.id, taskId: task.id, updatedAt });
+        rejectedPlan = this.requirePersistedPlan(previousPlan.id);
+        events.push({
+          eventType: "plan.rejected",
+          eventPayload: { plan: rejectedPlan, reason: "analysis_revised" }
+        });
+      }
+
+      if (task.status === "design_ready" || task.status === "awaiting_approval") {
+        this.updateTaskStatusRow(task.id, "analyzing", updatedAt, null);
+      } else {
+        this.touchTask(task.id, updatedAt);
+      }
+      const updatedTask = this.requireTask(task.id);
+      this.appendTaskEvent(updatedTask, "task.analysis_saved", { analysis }, updatedAt);
+      if (rejectedPlan) {
+        this.appendTaskEvent(
+          updatedTask,
+          "plan.rejected",
+          { plan: rejectedPlan, reason: "analysis_revised" },
+          updatedAt
+        );
+      }
+      if (updatedTask.status !== task.status) {
+        const statusPayload = {
+          taskId: updatedTask.id,
+          projectId: updatedTask.projectId,
+          fromStatus: task.status,
+          toStatus: updatedTask.status,
+          task: updatedTask
+        };
+        this.appendTaskEvent(updatedTask, "task.status_changed", statusPayload, updatedAt);
+        events.push({ eventType: "task.status_changed", eventPayload: statusPayload });
+      }
+      return { analysis, events, view: this.getTask({ id: task.id }) };
+    })();
+
+    return {
+      view: result.view,
+      events: result.events
+    };
+  }
+
+  saveTaskPlan(payload: TaskSavePlanCommandPayload): TaskPlanningMutationResult {
+    const steps = normalizePlanSteps(payload.steps);
+    const result = this.db.transaction(() => {
+      const task = this.requireTask(payload.taskId);
+      this.assertExpectedTaskVersion(task, payload.expectedTaskVersion);
+      if (["queued", "running", "verifying", "succeeded", "archived"].includes(task.status)) {
+        throw new Error(`Plan cannot be edited while task is ${task.status}.`);
+      }
+      const previousPlan = this.listTaskPlans(task)[0] ?? null;
+
+      const current = this.db
+        .prepare(
+          "SELECT COALESCE(MAX(version), 0) AS version FROM task_plan_versions WHERE task_id = @taskId"
+        )
+        .get({ taskId: task.id }) as { version: number };
+      const updatedAt = this.now();
+      let rejectedPlan: TaskPlanSummary | null = null;
+      if (
+        task.status === "awaiting_approval" &&
+        previousPlan?.approvalState === "pending" &&
+        !previousPlan.id.startsWith("legacy_")
+      ) {
+        this.db
+          .prepare(
+            `UPDATE task_plan_versions
+            SET approval_state = 'rejected', updated_at = @updatedAt
+            WHERE id = @planId AND task_id = @taskId`
+          )
+          .run({ planId: previousPlan.id, taskId: task.id, updatedAt });
+        rejectedPlan = this.requirePersistedPlan(previousPlan.id);
+      }
+      const plan = this.insertPlanVersion(
+        task.id,
+        current.version + 1,
+        payload.summary,
+        steps,
+        updatedAt,
+        "not_requested"
+      );
+      const events: TaskPlanningEvent[] = [
+        {
+          eventType: "plan.version_created",
+          eventPayload: { plan }
+        }
+      ];
+      if (rejectedPlan) {
+        events.unshift({
+          eventType: "plan.rejected",
+          eventPayload: { plan: rejectedPlan, reason: "plan_revised" }
+        });
+      }
+
+      if (task.status === "awaiting_approval") {
+        this.updateTaskStatusRow(task.id, "design_ready", updatedAt, null);
+        const updatedTask = this.requireTask(task.id);
+        const statusPayload = {
+          taskId: updatedTask.id,
+          projectId: updatedTask.projectId,
+          fromStatus: task.status,
+          toStatus: updatedTask.status,
+          task: updatedTask
+        };
+        this.appendTaskEvent(updatedTask, "task.status_changed", statusPayload, updatedAt);
+        events.unshift({ eventType: "task.status_changed", eventPayload: statusPayload });
+      } else {
+        this.touchTask(task.id, updatedAt);
+      }
+
+      const updatedTask = this.requireTask(task.id);
+      if (rejectedPlan) {
+        this.appendTaskEvent(
+          updatedTask,
+          "plan.rejected",
+          { plan: rejectedPlan, reason: "plan_revised" },
+          updatedAt
+        );
+      }
+      this.appendTaskEvent(updatedTask, "plan.version_created", { plan }, updatedAt);
+      return { plan, events, view: this.getTask({ id: task.id }) };
+    })();
+
+    return {
+      view: result.view,
+      events: result.events
+    };
+  }
+
+  requestTaskPlanApproval(
+    payload: TaskRequestPlanApprovalCommandPayload
+  ): TaskPlanningMutationResult {
+    const result = this.db.transaction(() => {
+      const task = this.requireTask(payload.taskId);
+      this.assertExpectedTaskVersion(task, payload.expectedTaskVersion);
+      if (task.status !== "design_ready") {
+        throw new Error(`Task must be design_ready before approval is requested; got ${task.status}.`);
+      }
+      const analysis = this.listTaskAnalyses(task.id)[0];
+      if (!analysis) {
+        throw new Error("Task analysis must be saved before plan approval is requested.");
+      }
+
+      const currentPlan = this.requireCurrentPlan(task);
+      if (currentPlan.id !== payload.planId) {
+        throw new Error("Only the latest plan version can be submitted for approval.");
+      }
+      if (currentPlan.id.startsWith("legacy_")) {
+        throw new Error("Legacy task steps must be saved as a versioned plan before approval.");
+      }
+      if (currentPlan.basedOnAnalysisVersion !== analysis.version) {
+        throw new Error(
+          `Plan version ${currentPlan.version} is based on analysis v${currentPlan.basedOnAnalysisVersion ?? "none"}; save a new plan for analysis v${analysis.version} before requesting approval.`
+        );
+      }
+      if (currentPlan.approvalState === "pending" || currentPlan.approvalState === "approved") {
+        throw new Error(`Plan is already ${currentPlan.approvalState}.`);
+      }
+
+      const updatedAt = this.now();
+      const approvalRequestId = this.makeId("approval");
+      const codeAgent = task.codeAgentId ? this.requireCodeAgent(task.codeAgentId) : null;
+      this.updateTaskStatusRow(task.id, "awaiting_approval", updatedAt, null);
+      const updatedTask = this.requireTask(task.id);
+      this.db
+        .prepare(
+          `UPDATE task_plan_versions
+          SET approval_state = 'pending',
+              approval_request_id = @approvalRequestId,
+              approval_task_version = @approvalTaskVersion,
+              approval_analysis_version = @approvalAnalysisVersion,
+              approval_code_agent_id = @approvalCodeAgentId,
+              approval_code_agent_updated_at = @approvalCodeAgentUpdatedAt,
+              updated_at = @updatedAt
+          WHERE id = @planId AND task_id = @taskId`
+        )
+        .run({
+          planId: currentPlan.id,
+          taskId: task.id,
+          approvalRequestId,
+          approvalTaskVersion: updatedTask.version,
+          approvalAnalysisVersion: analysis.version,
+          approvalCodeAgentId: codeAgent?.id ?? null,
+          approvalCodeAgentUpdatedAt: codeAgent?.updatedAt ?? null,
+          updatedAt
+        });
+
+      const plan = this.requirePersistedPlan(currentPlan.id);
+      const planPayload = { plan };
+      const statusPayload = {
+        taskId: updatedTask.id,
+        projectId: updatedTask.projectId,
+        fromStatus: task.status,
+        toStatus: updatedTask.status,
+        task: updatedTask
+      };
+      this.appendTaskEvent(updatedTask, "plan.approval_requested", planPayload, updatedAt);
+      this.appendTaskEvent(updatedTask, "task.status_changed", statusPayload, updatedAt);
+      return { plan, statusPayload, view: this.getTask({ id: task.id }) };
+    })();
+
+    return {
+      view: result.view,
+      events: [
+        {
+          eventType: "plan.approval_requested",
+          eventPayload: { plan: result.plan }
+        },
+        {
+          eventType: "task.status_changed",
+          eventPayload: result.statusPayload
+        }
+      ]
+    };
+  }
+
+  approveTaskPlan(payload: TaskApprovePlanCommandPayload): TaskPlanningMutationResult {
+    const result = this.db.transaction(() => {
+      const task = this.requireTask(payload.taskId);
+      this.assertExpectedTaskVersion(task, payload.expectedTaskVersion);
+      if (task.status !== "awaiting_approval") {
+        throw new Error(`Task must be awaiting_approval before approval; got ${task.status}.`);
+      }
+
+      const currentPlan = this.requireCurrentPlan(task);
+      if (currentPlan.id !== payload.planId || currentPlan.approvalState !== "pending") {
+        throw new Error("Only the latest pending plan version can be approved.");
+      }
+      const snapshot = currentPlan.approvalSnapshot;
+      if (!snapshot || snapshot.requestId !== payload.approvalRequestId) {
+        throw new Error("Approval request is stale or does not match the pending plan snapshot.");
+      }
+      if (snapshot.taskVersion !== task.version) {
+        throw new Error(
+          `Approval snapshot is stale: task was v${snapshot.taskVersion} and is now v${task.version}.`
+        );
+      }
+      const analysis = this.listTaskAnalyses(task.id)[0];
+      if (!analysis || analysis.version !== snapshot.analysisVersion) {
+        throw new Error("Approval snapshot is stale because the task analysis changed.");
+      }
+      if (task.codeAgentId !== snapshot.codeAgentId) {
+        throw new Error("Approval snapshot is stale because the selected codeAgent changed.");
+      }
+      const codeAgent = task.codeAgentId ? this.requireCodeAgent(task.codeAgentId) : null;
+      if ((codeAgent?.updatedAt ?? null) !== snapshot.codeAgentUpdatedAt) {
+        throw new Error("Approval snapshot is stale because the codeAgent profile changed.");
+      }
+
+      const updatedAt = this.now();
+      this.db
+        .prepare(
+          `UPDATE task_plan_versions
+          SET approval_state = 'approved', updated_at = @updatedAt
+          WHERE id = @planId AND task_id = @taskId
+            AND approval_state = 'pending'
+            AND approval_request_id = @approvalRequestId`
+        )
+        .run({
+          planId: currentPlan.id,
+          taskId: task.id,
+          approvalRequestId: payload.approvalRequestId,
+          updatedAt
+        });
+      this.updateTaskStatusRow(task.id, "queued", updatedAt, null);
+
+      const updatedTask = this.requireTask(task.id);
+      const plan = this.requirePersistedPlan(currentPlan.id);
+      const planPayload = { plan };
+      const statusPayload = {
+        taskId: updatedTask.id,
+        projectId: updatedTask.projectId,
+        fromStatus: task.status,
+        toStatus: updatedTask.status,
+        task: updatedTask
+      };
+      this.appendTaskEvent(updatedTask, "plan.approved", planPayload, updatedAt);
+      this.appendTaskEvent(updatedTask, "task.status_changed", statusPayload, updatedAt);
+      return { plan, statusPayload, view: this.getTask({ id: task.id }) };
+    })();
+
+    return {
+      view: result.view,
+      events: [
+        {
+          eventType: "plan.approved",
+          eventPayload: { plan: result.plan }
+        },
+        {
+          eventType: "task.status_changed",
+          eventPayload: result.statusPayload
+        }
+      ]
+    };
   }
 
   countTasks(): number {
@@ -918,6 +1511,11 @@ export class PersonalClawSqliteStore {
 
   private migrate(): void {
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        id TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS user_profiles (
         id TEXT PRIMARY KEY,
         display_name TEXT NOT NULL,
@@ -996,11 +1594,277 @@ export class PersonalClawSqliteStore {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS task_analysis_versions (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        version INTEGER NOT NULL,
+        objective TEXT NOT NULL,
+        known_information_json TEXT NOT NULL,
+        missing_information_json TEXT NOT NULL,
+        constraints_json TEXT NOT NULL,
+        risks_json TEXT NOT NULL,
+        expected_artifacts_json TEXT NOT NULL,
+        completion_definition_json TEXT NOT NULL,
+        suggested_automation_level TEXT NOT NULL CHECK(suggested_automation_level IN ('L0', 'L1', 'L2', 'L3', 'L4')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(task_id, version)
+      );
+
+      CREATE TABLE IF NOT EXISTS task_plan_versions (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        version INTEGER NOT NULL,
+        summary TEXT NOT NULL,
+        based_on_analysis_version INTEGER,
+        approval_state TEXT NOT NULL CHECK(approval_state IN ('not_requested', 'pending', 'approved', 'rejected')),
+        approval_request_id TEXT,
+        approval_task_version INTEGER,
+        approval_analysis_version INTEGER,
+        approval_code_agent_id TEXT,
+        approval_code_agent_updated_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(task_id, version)
+      );
+
+      CREATE TABLE IF NOT EXISTS task_plan_steps (
+        id TEXT PRIMARY KEY,
+        plan_id TEXT NOT NULL REFERENCES task_plan_versions(id),
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        step_key TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        type TEXT NOT NULL CHECK(type IN ('agent', 'tool', 'human_input', 'approval', 'verification', 'notification')),
+        title TEXT NOT NULL,
+        goal TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'active', 'done', 'blocked', 'failed')),
+        input_json TEXT NOT NULL,
+        depends_on_json TEXT NOT NULL,
+        success_criteria_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(plan_id, step_key),
+        UNIQUE(plan_id, sequence)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_projects_owner_status ON projects(owner_id, status);
       CREATE INDEX IF NOT EXISTS idx_tasks_project_archived ON tasks(project_id, archived_at, updated_at);
       CREATE INDEX IF NOT EXISTS idx_task_events_task_sequence ON task_events(task_id, sequence);
       CREATE INDEX IF NOT EXISTS idx_plan_steps_task_sequence ON plan_steps(task_id, sequence);
+      CREATE INDEX IF NOT EXISTS idx_task_analysis_versions_task ON task_analysis_versions(task_id, version);
+      CREATE INDEX IF NOT EXISTS idx_task_plan_versions_task ON task_plan_versions(task_id, version);
+      CREATE INDEX IF NOT EXISTS idx_task_plan_steps_plan_sequence ON task_plan_steps(plan_id, sequence);
     `);
+
+    this.ensureColumn("task_plan_versions", "based_on_analysis_version", "INTEGER");
+    this.ensureColumn("task_plan_versions", "approval_request_id", "TEXT");
+    this.ensureColumn("task_plan_versions", "approval_task_version", "INTEGER");
+    this.ensureColumn("task_plan_versions", "approval_analysis_version", "INTEGER");
+    this.ensureColumn("task_plan_versions", "approval_code_agent_id", "TEXT");
+    this.ensureColumn("task_plan_versions", "approval_code_agent_updated_at", "TEXT");
+    this.runMigration("phase2_materialize_legacy_plans", () => this.materializeLegacyPlans());
+    this.runMigration("phase2_reconcile_unbound_approval_snapshots", () =>
+      this.reconcileUnboundApprovalSnapshots()
+    );
+  }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const columns = this.db.pragma(`table_info(${table})`) as Array<{ name?: unknown }>;
+    if (columns.some((item) => item.name === column)) {
+      return;
+    }
+
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+
+  private runMigration(id: string, migrate: () => void): void {
+    const applied = this.db
+      .prepare("SELECT id FROM schema_migrations WHERE id = @id")
+      .get({ id });
+    if (applied) {
+      return;
+    }
+
+    this.db.transaction(() => {
+      migrate();
+      this.db
+        .prepare("INSERT INTO schema_migrations (id, applied_at) VALUES (@id, @appliedAt)")
+        .run({ id, appliedAt: this.now() });
+    })();
+  }
+
+  private materializeLegacyPlans(): void {
+    const taskRows = this.db
+      .prepare(
+        `SELECT DISTINCT tasks.*
+        FROM tasks
+        INNER JOIN plan_steps ON plan_steps.task_id = tasks.id
+        ORDER BY tasks.created_at ASC`
+      )
+      .all() as TaskRow[];
+
+    for (const taskRow of taskRows) {
+      const legacySteps = this.db
+        .prepare("SELECT * FROM plan_steps WHERE task_id = @taskId ORDER BY sequence ASC")
+        .all({ taskId: taskRow.id }) as PlanStepRow[];
+      if (legacySteps.length === 0) {
+        continue;
+      }
+
+      const existing = this.db
+        .prepare("SELECT COUNT(*) AS count FROM task_plan_versions WHERE task_id = @taskId")
+        .get({ taskId: taskRow.id }) as { count: number };
+      if (existing.count > 0) {
+        this.db
+          .prepare(
+            "UPDATE task_plan_versions SET version = version + 1000000 WHERE task_id = @taskId"
+          )
+          .run({ taskId: taskRow.id });
+        this.db
+          .prepare(
+            "UPDATE task_plan_versions SET version = version - 999999 WHERE task_id = @taskId"
+          )
+          .run({ taskId: taskRow.id });
+      }
+
+      const analysisRow = this.db
+        .prepare(
+          "SELECT version FROM task_analysis_versions WHERE task_id = @taskId ORDER BY version DESC LIMIT 1"
+        )
+        .get({ taskId: taskRow.id }) as { version: number } | undefined;
+      const planId = this.makeId("plan");
+      this.db
+        .prepare(
+          `INSERT INTO task_plan_versions (
+            id, task_id, version, summary, based_on_analysis_version, approval_state,
+            approval_request_id, approval_task_version, approval_analysis_version,
+            approval_code_agent_id, approval_code_agent_updated_at, created_at, updated_at
+          ) VALUES (
+            @id, @taskId, 1, @summary, @basedOnAnalysisVersion, 'not_requested',
+            NULL, NULL, NULL, NULL, NULL, @createdAt, @updatedAt
+          )`
+        )
+        .run({
+          id: planId,
+          taskId: taskRow.id,
+          summary: taskRow.goal,
+          basedOnAnalysisVersion: analysisRow?.version ?? null,
+          createdAt: taskRow.created_at,
+          updatedAt: taskRow.updated_at
+        });
+
+      const keyById = new Map(
+        legacySteps.map((step, index) => [step.id, `step_${index + 1}`] as const)
+      );
+      for (const [index, step] of legacySteps.entries()) {
+        this.db
+          .prepare(
+            `INSERT INTO task_plan_steps (
+              id, plan_id, task_id, step_key, sequence, type, title, goal, status,
+              input_json, depends_on_json, success_criteria_json, created_at, updated_at
+            ) VALUES (
+              @id, @planId, @taskId, @stepKey, @sequence, @type, @title, @goal, @status,
+              @inputJson, @dependsOnJson, @successCriteriaJson, @createdAt, @updatedAt
+            )`
+          )
+          .run({
+            id: this.makeId("plan_step"),
+            planId,
+            taskId: taskRow.id,
+            stepKey: keyById.get(step.id) ?? `step_${index + 1}`,
+            sequence: index + 1,
+            type: step.type,
+            title: step.title,
+            goal: step.goal,
+            status: step.status,
+            inputJson: step.input_json,
+            dependsOnJson: stringifyJson(
+              parseStringArray(step.depends_on_json).map(
+                (dependency) => keyById.get(dependency) ?? dependency
+              )
+            ),
+            successCriteriaJson: step.success_criteria_json,
+            createdAt: step.created_at,
+            updatedAt: step.updated_at
+          });
+      }
+    }
+  }
+
+  private reconcileUnboundApprovalSnapshots(): void {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM task_plan_versions
+        WHERE approval_state IN ('pending', 'approved')
+          AND approval_request_id IS NULL`
+      )
+      .all() as TaskPlanRow[];
+
+    for (const row of rows) {
+      const taskRow = this.db
+        .prepare("SELECT * FROM tasks WHERE id = @taskId")
+        .get({ taskId: row.task_id }) as TaskRow | undefined;
+      if (!taskRow) {
+        throw new Error(`Cannot reconcile approval for missing task: ${row.task_id}`);
+      }
+
+      const updatedAt = this.now();
+      const analysisRow = this.db
+        .prepare(
+          `SELECT version FROM task_analysis_versions
+          WHERE task_id = @taskId
+          ORDER BY version DESC LIMIT 1`
+        )
+        .get({ taskId: row.task_id }) as { version: number } | undefined;
+
+      if (row.approval_state === "pending" || !analysisRow) {
+        this.db
+          .prepare(
+            `UPDATE task_plan_versions
+            SET approval_state = 'rejected', updated_at = @updatedAt
+            WHERE id = @planId`
+          )
+          .run({ planId: row.id, updatedAt });
+
+        const fallbackStatus =
+          taskRow.status === "awaiting_approval"
+            ? "design_ready"
+            : taskRow.status === "queued"
+              ? "cancelled"
+              : taskRow.status;
+        if (fallbackStatus !== taskRow.status) {
+          this.updateTaskStatusRow(taskRow.id, fallbackStatus, updatedAt, null);
+        }
+        continue;
+      }
+
+      const codeAgentRow = taskRow.code_agent_id
+        ? this.getCodeAgentRow(taskRow.code_agent_id)
+        : undefined;
+      this.db
+        .prepare(
+          `UPDATE task_plan_versions
+          SET approval_request_id = @approvalRequestId,
+              approval_task_version = @approvalTaskVersion,
+              approval_analysis_version = @approvalAnalysisVersion,
+              approval_code_agent_id = @approvalCodeAgentId,
+              approval_code_agent_updated_at = @approvalCodeAgentUpdatedAt,
+              updated_at = @updatedAt
+          WHERE id = @planId`
+        )
+        .run({
+          planId: row.id,
+          approvalRequestId: `legacy_approval_${row.id}`,
+          approvalTaskVersion: Math.max(
+            1,
+            taskRow.version - (taskRow.status === "queued" ? 1 : 0)
+          ),
+          approvalAnalysisVersion: analysisRow.version,
+          approvalCodeAgentId: codeAgentRow?.id ?? null,
+          approvalCodeAgentUpdatedAt: codeAgentRow?.updated_at ?? null,
+          updatedAt
+        });
+    }
   }
 
   private seed(): void {
@@ -1086,6 +1950,233 @@ export class PersonalClawSqliteStore {
       });
   }
 
+  private listTaskAnalyses(taskId: string): TaskAnalysisSummary[] {
+    const rows = this.db
+      .prepare("SELECT * FROM task_analysis_versions WHERE task_id = @taskId ORDER BY version DESC")
+      .all({ taskId }) as TaskAnalysisRow[];
+
+    return rows.map(toTaskAnalysisSummary);
+  }
+
+  private insertAnalysisVersion(
+    taskId: string,
+    version: number,
+    analysis: TaskAnalysisInput,
+    timestamp: string
+  ): TaskAnalysisSummary {
+    const id = this.makeId("analysis");
+    this.db
+      .prepare(
+        `INSERT INTO task_analysis_versions (
+          id, task_id, version, objective, known_information_json, missing_information_json,
+          constraints_json, risks_json, expected_artifacts_json, completion_definition_json,
+          suggested_automation_level, created_at, updated_at
+        ) VALUES (
+          @id, @taskId, @version, @objective, @knownInformationJson, @missingInformationJson,
+          @constraintsJson, @risksJson, @expectedArtifactsJson, @completionDefinitionJson,
+          @suggestedAutomationLevel, @createdAt, @createdAt
+        )`
+      )
+      .run({
+        id,
+        taskId,
+        version,
+        objective: analysis.objective.trim(),
+        knownInformationJson: stringifyJson(analysis.knownInformation),
+        missingInformationJson: stringifyJson(analysis.missingInformation),
+        constraintsJson: stringifyJson(analysis.constraints),
+        risksJson: stringifyJson(analysis.risks),
+        expectedArtifactsJson: stringifyJson(analysis.expectedArtifacts),
+        completionDefinitionJson: stringifyJson(analysis.completionDefinition),
+        suggestedAutomationLevel: analysis.suggestedAutomationLevel,
+        createdAt: timestamp
+      });
+
+    const row = this.db
+      .prepare("SELECT * FROM task_analysis_versions WHERE id = @id")
+      .get({ id }) as TaskAnalysisRow;
+    return toTaskAnalysisSummary(row);
+  }
+
+  private insertPlanVersion(
+    taskId: string,
+    version: number,
+    summary: string,
+    steps: readonly NormalizedPlanStep[],
+    timestamp: string,
+    approvalState: TaskPlanApprovalState
+  ): TaskPlanSummary {
+    const id = this.makeId("plan");
+    const analysisRow = this.db
+      .prepare(
+        "SELECT version FROM task_analysis_versions WHERE task_id = @taskId ORDER BY version DESC LIMIT 1"
+      )
+      .get({ taskId }) as { version: number } | undefined;
+    this.db
+      .prepare(
+        `INSERT INTO task_plan_versions (
+          id, task_id, version, summary, based_on_analysis_version, approval_state,
+          approval_request_id, approval_task_version, approval_analysis_version,
+          approval_code_agent_id, approval_code_agent_updated_at, created_at, updated_at
+        ) VALUES (
+          @id, @taskId, @version, @summary, @basedOnAnalysisVersion, @approvalState,
+          NULL, NULL, NULL, NULL, NULL, @createdAt, @createdAt
+        )`
+      )
+      .run({
+        id,
+        taskId,
+        version,
+        summary: summary.trim(),
+        basedOnAnalysisVersion: analysisRow?.version ?? null,
+        approvalState,
+        createdAt: timestamp
+      });
+
+    for (const [index, step] of steps.entries()) {
+      this.db
+        .prepare(
+          `INSERT INTO task_plan_steps (
+            id, plan_id, task_id, step_key, sequence, type, title, goal, status,
+            input_json, depends_on_json, success_criteria_json, created_at, updated_at
+          ) VALUES (
+            @id, @planId, @taskId, @stepKey, @sequence, @type, @title, @goal, @status,
+            @inputJson, @dependsOnJson, @successCriteriaJson, @createdAt, @createdAt
+          )`
+        )
+        .run({
+          id: this.makeId("plan_step"),
+          planId: id,
+          taskId,
+          stepKey: step.key,
+          sequence: index + 1,
+          type: step.type,
+          title: step.title.trim(),
+          goal: step.goal.trim(),
+          status: step.status ?? "pending",
+          inputJson: stringifyJson(step.input ?? {}),
+          dependsOnJson: stringifyJson(step.dependsOn ?? []),
+          successCriteriaJson: stringifyJson(step.successCriteria ?? []),
+          createdAt: timestamp
+        });
+    }
+
+    const row = this.db
+      .prepare("SELECT * FROM task_plan_versions WHERE id = @id")
+      .get({ id }) as TaskPlanRow;
+    const stepRows = this.db
+      .prepare("SELECT * FROM task_plan_steps WHERE plan_id = @planId ORDER BY sequence ASC")
+      .all({ planId: id }) as TaskPlanStepRow[];
+    return toTaskPlanSummary(row, stepRows);
+  }
+
+  private listTaskPlans(task: TaskSummary): TaskPlanSummary[] {
+    const planRows = this.db
+      .prepare("SELECT * FROM task_plan_versions WHERE task_id = @taskId ORDER BY version DESC")
+      .all({ taskId: task.id }) as TaskPlanRow[];
+    const plans = planRows.map((planRow) => {
+      const stepRows = this.db
+        .prepare("SELECT * FROM task_plan_steps WHERE plan_id = @planId ORDER BY sequence ASC")
+        .all({ planId: planRow.id }) as TaskPlanStepRow[];
+
+      return toTaskPlanSummary(planRow, stepRows);
+    });
+
+    if (plans.length > 0) {
+      return plans;
+    }
+
+    const legacyRows = this.db
+      .prepare("SELECT * FROM plan_steps WHERE task_id = @taskId ORDER BY sequence ASC")
+      .all({ taskId: task.id }) as PlanStepRow[];
+
+    if (legacyRows.length === 0) {
+      return [];
+    }
+
+    const keyById = new Map(legacyRows.map((row) => [row.id, `step_${row.sequence}`] as const));
+    const legacySteps = legacyRows.map((row) => ({
+      ...toPlanStepSummary(row),
+      key: keyById.get(row.id) ?? `step_${row.sequence}`,
+      dependsOn: parseStringArray(row.depends_on_json).map(
+        (dependency) => keyById.get(dependency) ?? dependency
+      )
+    }));
+
+    return [
+      TaskPlanSummarySchema.parse({
+        id: `legacy_${task.id}`,
+        taskId: task.id,
+        version: 1,
+        summary: task.goal,
+        basedOnAnalysisVersion: null,
+        approvalState: "not_requested",
+        approvalSnapshot: null,
+        steps: legacySteps,
+        createdAt: task.createdAt,
+        updatedAt: task.updatedAt
+      })
+    ];
+  }
+
+  private requireCurrentPlan(task: TaskSummary): TaskPlanSummary {
+    const plan = this.listTaskPlans(task)[0];
+    if (!plan) {
+      throw new Error(`Task has no plan version: ${task.id}`);
+    }
+    return plan;
+  }
+
+  private assertExpectedTaskVersion(task: TaskSummary, expectedVersion: number | undefined): void {
+    if (expectedVersion !== undefined && task.version !== expectedVersion) {
+      throw new Error(
+        `Task version conflict: expected ${expectedVersion}, current ${task.version}. Refresh before saving a new version.`
+      );
+    }
+  }
+
+  private requirePersistedPlan(planId: string): TaskPlanSummary {
+    const row = this.db
+      .prepare("SELECT * FROM task_plan_versions WHERE id = @planId")
+      .get({ planId }) as TaskPlanRow | undefined;
+    if (!row) {
+      throw new Error(`Plan version not found: ${planId}`);
+    }
+    const steps = this.db
+      .prepare("SELECT * FROM task_plan_steps WHERE plan_id = @planId ORDER BY sequence ASC")
+      .all({ planId }) as TaskPlanStepRow[];
+    return toTaskPlanSummary(row, steps);
+  }
+
+  private touchTask(taskId: string, updatedAt: string): void {
+    this.db
+      .prepare(
+        `UPDATE tasks
+        SET updated_at = @updatedAt,
+            version = version + 1
+        WHERE id = @taskId`
+      )
+      .run({ taskId, updatedAt });
+  }
+
+  private updateTaskStatusRow(
+    taskId: string,
+    status: TaskStatusDto,
+    updatedAt: string,
+    blockedReason: string | null
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE tasks
+        SET status = @status,
+            blocked_reason = @blockedReason,
+            updated_at = @updatedAt,
+            version = version + 1
+        WHERE id = @taskId`
+      )
+      .run({ taskId, status, blockedReason, updatedAt });
+  }
+
   private requireProject(id: string): ProjectSummary {
     return toProjectSummary(this.requireProjectRow(id));
   }
@@ -1114,6 +2205,24 @@ export class PersonalClawSqliteStore {
     }
 
     return toCodeAgentProfile(row);
+  }
+
+  private assertCodeAgentProfileMutable(id: string): void {
+    const lockedTask = this.db
+      .prepare(
+        `SELECT id, status FROM tasks
+        WHERE code_agent_id = @id
+          AND archived_at IS NULL
+          AND status IN ('awaiting_approval', 'queued', 'running', 'paused', 'blocked', 'verifying')
+        LIMIT 1`
+      )
+      .get({ id }) as { id: string; status: TaskStatusDto } | undefined;
+
+    if (lockedTask) {
+      throw new Error(
+        `codeAgent profile ${id} is frozen by task ${lockedTask.id} while it is ${lockedTask.status}.`
+      );
+    }
   }
 
   private requireTask(id: string): TaskSummary {

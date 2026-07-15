@@ -4,6 +4,7 @@ export const TASK_STATUSES = [
   "draft",
   "analyzing",
   "design_ready",
+  "awaiting_approval",
   "queued",
   "running",
   "paused",
@@ -20,7 +21,8 @@ export type TaskStatus = (typeof TASK_STATUSES)[number];
 const transitions: Record<TaskStatus, readonly TaskStatus[]> = {
   draft: ["analyzing", "archived", "cancelled"],
   analyzing: ["design_ready", "blocked", "failed", "cancelled"],
-  design_ready: ["queued", "analyzing", "archived", "cancelled"],
+  design_ready: ["awaiting_approval", "analyzing", "archived", "cancelled"],
+  awaiting_approval: ["queued", "design_ready", "archived", "cancelled"],
   queued: ["running", "paused", "cancelled"],
   running: ["paused", "blocked", "verifying", "failed", "cancelled"],
   paused: ["queued", "running", "cancelled"],
@@ -34,6 +36,10 @@ const transitions: Record<TaskStatus, readonly TaskStatus[]> = {
 
 export function canTransitionTaskStatus(from: TaskStatus, to: TaskStatus): boolean {
   return transitions[from].includes(to);
+}
+
+export function getAvailableTaskStatusTransitions(status: TaskStatus): readonly TaskStatus[] {
+  return [...transitions[status]];
 }
 
 export function assertTaskStatusTransition(from: TaskStatus, to: TaskStatus): void {

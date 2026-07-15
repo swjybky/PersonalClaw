@@ -23,11 +23,17 @@ import type {
   ProjectListPayload,
   ProjectUpdateCommandPayload,
   TaskAssignCodeAgentCommandPayload,
+  TaskAnalysisSummary,
+  TaskApprovePlanCommandPayload,
   TaskCreateCommandPayload,
   TaskDeleteCommandPayload,
   TaskGetCommandPayload,
   TaskListCommandPayload,
   TaskListPayload,
+  TaskPlanSummary,
+  TaskRequestPlanApprovalCommandPayload,
+  TaskSaveAnalysisCommandPayload,
+  TaskSavePlanCommandPayload,
   TaskSetStatusCommandPayload,
   TaskStatusView,
   TaskSummary,
@@ -54,6 +60,12 @@ export interface PersonalClawApi {
     setStatus(payload: TaskSetStatusCommandPayload): Promise<TaskSummary>;
     updateProgress(payload: TaskUpdateProgressCommandPayload): Promise<TaskSummary>;
     assignCodeAgent(payload: TaskAssignCodeAgentCommandPayload): Promise<TaskSummary>;
+    saveAnalysis(payload: TaskSaveAnalysisCommandPayload): Promise<TaskAnalysisSummary>;
+    savePlan(payload: TaskSavePlanCommandPayload): Promise<TaskPlanSummary>;
+    requestPlanApproval(
+      payload: TaskRequestPlanApprovalCommandPayload
+    ): Promise<TaskPlanSummary>;
+    approvePlan(payload: TaskApprovePlanCommandPayload): Promise<TaskPlanSummary>;
   };
   project: {
     create(payload: ProjectCreateCommandPayload): Promise<ProjectListPayload>;

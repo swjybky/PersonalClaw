@@ -9,6 +9,15 @@ export const navigationItems = [
     modules: ["对话入口", "任务草稿", "会话上下文", "pi runtime Adapter"]
   },
   {
+    key: "task-center",
+    label: "任务中心",
+    eyebrow: "结构化任务工作台",
+    title: "任务中心",
+    phase: "Phase 2A",
+    summary: "按目标、分析、方案、执行和结果五段管理任务，并维护分析与方案版本。",
+    modules: ["任务列表", "结构化分析", "DAG 方案", "计划审批", "审计事件"]
+  },
+  {
     key: "model-config",
     label: "模型配置",
     eyebrow: "pi-ai 模型与密钥",

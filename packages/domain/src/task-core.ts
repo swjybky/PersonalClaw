@@ -16,6 +16,11 @@ export interface PlanStepProgressInput {
   status: PlanStepProgressStatus;
 }
 
+export interface PlanStepDagInput {
+  key: string;
+  dependsOn?: readonly string[];
+}
+
 function assertNonEmpty(value: string, code: string, message: string): void {
   if (!value.trim()) {
     throw new DomainError(code, message);
@@ -61,4 +66,71 @@ export function assertTaskStatusChange(from: TaskStatus, to: TaskStatus): void {
 
 export function canArchiveTaskStatus(status: TaskStatus): boolean {
   return status === "archived" || canTransitionTaskStatus(status, "archived");
+}
+
+/**
+ * Validates the dependency graph for a persisted plan version. Transport DTOs
+ * may omit a key while they are still drafts, but the application layer must
+ * assign stable keys before invoking this domain rule.
+ */
+export function assertPlanStepDag(steps: readonly PlanStepDagInput[]): void {
+  const dependenciesByKey = new Map<string, readonly string[]>();
+
+  for (const step of steps) {
+    const key = step.key.trim();
+
+    if (!key) {
+      throw new DomainError("plan.step_key_required", "Every plan step must have a stable key.");
+    }
+
+    if (dependenciesByKey.has(key)) {
+      throw new DomainError("plan.duplicate_step_key", `Plan step key is duplicated: ${key}.`);
+    }
+
+    dependenciesByKey.set(
+      key,
+      (step.dependsOn ?? []).map((dependency) => dependency.trim())
+    );
+  }
+
+  for (const [key, dependencies] of dependenciesByKey) {
+    for (const dependency of dependencies) {
+      if (dependency === key) {
+        throw new DomainError("plan.self_dependency", `Plan step cannot depend on itself: ${key}.`);
+      }
+
+      if (!dependenciesByKey.has(dependency)) {
+        throw new DomainError(
+          "plan.unknown_dependency",
+          `Plan step ${key} depends on an unknown step: ${dependency}.`
+        );
+      }
+    }
+  }
+
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+
+  const visit = (key: string): void => {
+    if (visited.has(key)) {
+      return;
+    }
+
+    if (visiting.has(key)) {
+      throw new DomainError("plan.cyclic_dependency", `Plan contains a dependency cycle at step: ${key}.`);
+    }
+
+    visiting.add(key);
+
+    for (const dependency of dependenciesByKey.get(key) ?? []) {
+      visit(dependency);
+    }
+
+    visiting.delete(key);
+    visited.add(key);
+  };
+
+  for (const key of dependenciesByKey.keys()) {
+    visit(key);
+  }
 }
